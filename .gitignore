@@ -1,1 +1,19 @@
-
+# Microscopy data — never commit
+*.tif
+*.tiff
+*.czi
+*.lsm
+*.nd2
+# Pipeline outputs
+measure_mock/
+qc/
+masks/
+*.csv
+!tests/expected_outputs/*.csv      # exception: keep test fixtures
+# OS / IDE clutter
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Fiji
+.recently_used
