@@ -64,7 +64,7 @@ var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
                + "macro_mode,threshold_mode,"
                + "threshold_value,n_top_pixels,n_cyto_pixels,"
                + "mean_top,median_top,std_top,"
-               + "p95,p99,p99_25,p99_5,p99_9,"
+               + "p95,p99,p99_25,p99_5,p99_9,p99_95,p99_99,p99_995,p99_999"
                + "cell_thr_method,nuc_thr_method,"
                + "blur_sigma_cell,blur_sigma_nuc,"
                + "macro_version,run_id\n";
@@ -520,7 +520,7 @@ function measureAndWrite(marker, chTitle, cytoRoiId, nCyto,
     }
 
     stats = computeTopStats(counts, nBins, nTotal, TOP_PCT);
-    // stats = [thr, nTop, meanTop, medianTop, stdTop, p95, p99, p99_25, p99_5, p99_9]
+    // stats = [thr, nTop, meanTop, medianTop, stdTop, p95, p99, p99_25, p99_5, p99_9, p99_95, p99_99, p99_995, p99_999]
 
     csvPath = MEASURE_DIR + CELL_LINE + "_mock_" + tp + "_" + marker + "_in_" + comboKey + ".csv";
     appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, marker, stats, nCyto);
@@ -569,9 +569,13 @@ function computeTopStats(counts, nBins, nTotal, topPct) {
     p99_25 = pctIndex(counts, nBins, nTotal, 99.25);
     p99_5  = pctIndex(counts, nBins, nTotal, 99.5);
     p99_9  = pctIndex(counts, nBins, nTotal, 99.9);
+    p99_95  = pctIndex(counts, nBins, nTotal, 99.95);
+    p99_99  = pctIndex(counts, nBins, nTotal, 99.99);
+    p99_995  = pctIndex(counts, nBins, nTotal, 99.995);
+    p99_999  = pctIndex(counts, nBins, nTotal, 99.999);
 
     return newArray(threshold_value, nTop, mean_top, median_top, std_top,
-                    p95, p99, p99_25, p99_5, p99_9);
+                    p95, p99, p99_25, p99_5, p99_9, p99_95, p99_99, p99_995, p99_999);
 }
 
 function pctIndex(counts, nBins, nTotal, p) {
