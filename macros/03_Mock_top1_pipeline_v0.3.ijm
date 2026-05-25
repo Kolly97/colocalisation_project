@@ -55,11 +55,12 @@ var SAVE_QC    = true;
 var SAVE_MASKS = true;
 
 // Reproducibility
-var MACRO_VERSION = "0.3.0";
+var MACRO_VERSION = "0.3.1";
 
 // CSV header (must match appendCsvRow order)
 var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
                + "stat_method,top_pct,"
+               + "macro_modus,threshold_modus,"
                + "threshold_value,n_top_pixels,n_cyto_pixels,"
                + "mean_top,median_top,std_top,"
                + "p95,p99,p99_25,p99_5,p99_9,"
@@ -83,6 +84,8 @@ print("Cell line (startup): " + CELL_LINE);
 print("Markers   : " + arrToStr(MARKERS));
 print("Combos    : " + arrToStr(ANALYSE_COMBI));
 print("Timepoints: " + arrToStr(TIMEPOINTS));
+print("Script Modus: " + MODUS);
+print("Threshold Modus" + THR_MODUS);
 print("Found " + mockFiles.length + " mock .tif files.");
 
 // No batch mode in v0.3 — dialogs need a visible GUI and you
@@ -588,6 +591,7 @@ function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
                       stats, nCyto) {
     line = imgName + "," + cellLine + "," + tp + "," + comboKey + "," + channel
         + "," + STAT_METHOD + "," + TOP_PCT
+        + "," + MODUS + "," + THR_MODUS
         + "," + stats[0] + "," + stats[1] + "," + nCyto
         + "," + stats[2] + "," + stats[3] + "," + stats[4]
         + "," + stats[5] + "," + stats[6] + "," + stats[7] + "," + stats[8] + "," + stats[9]
@@ -598,14 +602,14 @@ function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
 }
 
 function saveMasksTif(imgName) {
-    masksDir = MEASURE_DIR + "masks" + File.separator;
-    selectWindow("Cell_Mask");    saveAs("Tiff", masksDir + imgName + "_cell.tif");
-    selectWindow("Nucleus_Mask"); saveAs("Tiff", masksDir + imgName + "_nuc.tif");
-    selectWindow("Cytosol_Mask"); saveAs("Tiff", masksDir + imgName + "_cyto.tif");
+    masksDir = MEASURE_DIR + RUN_ID + "masks" + File.separator;
+    selectWindow("Cell_Mask");    saveAs("Tiff", masksDir + RUN_ID + "_" + imgName + "_cell.tif");
+    selectWindow("Nucleus_Mask"); saveAs("Tiff", masksDir + RUN_ID + "_" + imgName + "_nuc.tif");
+    selectWindow("Cytosol_Mask"); saveAs("Tiff", masksDir + RUN_ID + "_" + imgName + "_cyto.tif");
 }
 
 function saveQcOverlay(imgName, m1) {
-    qcDir = MEASURE_DIR + "qc" + File.separator;
+    qcDir = MEASURE_DIR + RUN_ID + "qc" + File.separator;
     src = m1 + "_channel";
     if (!isOpen(src)) return;
 
@@ -620,7 +624,7 @@ function saveQcOverlay(imgName, m1) {
     run("Restore Selection");
     run("Add Selection...");
     run("Flatten");
-    saveAs("PNG", qcDir + imgName + "_qc.png");
+    saveAs("PNG", qcDir + RUN_ID + "_" imgName + "_qc.png");
     close();   // close the flattened (now active after saveAs)
     if (isOpen("qc_tmp")) { selectWindow("qc_tmp"); close(); }
 }
