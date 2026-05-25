@@ -33,7 +33,7 @@ var MEASURE_DIR_RUN_ID;
 var RUN_ID;
 var MODE;        // "filename" or "dialog"
 var THR_MODE; 	// "manual"or "automatic"
-var CELL_LINE;   // dialog mode: set at startup; filename mode: per image (overwritten)
+var CELL_LINE = newArray("Huh7", "VeroE6");// dialog mode: set at startup; filename mode: per image (overwritten)
 
 // Lists used by CSV setup and per-image dialog
 var MARKERS       = newArray("HA568", "HA488", "dsRNA488", "NS4B568");
@@ -75,9 +75,9 @@ chooseInputDir();
 askModeAndConfig();   // may overwrite MODE/CELL_LINE/MARKERS/ANALYSE_COMBI/TIMEPOINTS
 RUN_ID = makeRunId();
 buildOutputDir();
+mockFiles = listMockFiles();
 initCsvFiles();
 
-mockFiles = listMockFiles();
 print("=== Mock pipeline V" + MACRO_VERSION + " | run_id=" + RUN_ID + " | mode=" + MODE + " ===");
 print("Input  : " + INPUT_DIR);
 print("Output : " + MEASURE_DIR);
@@ -119,9 +119,13 @@ function askModeAndConfig() {
         newArray("filename", "dialog"), 2, 1, "filename");
     Dialog.addRadioButtonGroup("Threshold Moudus:",
         newArray("manual", "automatic"), 2, 1, "automatic");
+    Dialog.addMessage("What cell line are you analysing?");
+    Dialog.addRadioButtonGroup("Cell Line:",
+        newArray("Huh7", "VeroE6"), 2, 1, "Huh7");
     Dialog.show();
     MODE = Dialog.getRadioButton();
     THR_MODE = Dialog.getRadioButton();
+    CELL_LINE = Dialog.getRadioButton();
 
     // ---- Step 2: config (only in dialog mode) ----
     // In filename mode the var defaults at the top of the file
@@ -130,20 +134,16 @@ function askModeAndConfig() {
         Dialog.create("Pipeline setup (dialog mode)");
         Dialog.addMessage("These values define CSV files and the per-image dialog options.\n"
                         + "Lists are comma-separated. Whitespace is trimmed.");
-        Dialog.addString("Cell line:", "Huh7", 12);
         Dialog.addString("Markers:",      arrToStr(MARKERS),       40);
         Dialog.addString("Combos:",       arrToStr(ANALYSE_COMBI), 40);
         Dialog.addString("Timepoints:",   arrToStr(TIMEPOINTS),    20);
         Dialog.show();
 
         // get* calls MUST be in the same order as add* calls.
-        CELL_LINE     = Dialog.getString();
         MARKERS       = parseCsvString(Dialog.getString());
         ANALYSE_COMBI = parseCsvString(Dialog.getString());
         TIMEPOINTS    = parseCsvString(Dialog.getString());
-    } else {
-        CELL_LINE = "";   // set per-image from filename token[1]
-    }
+    } 
 }
 
 // ISO-ish timestamp without separators.
@@ -174,13 +174,14 @@ function initCsvFiles() {
         m1 = parts[0]; m2 = parts[1];
         for (t = 0; t < TIMEPOINTS.length; t++) {
             tp = TIMEPOINTS[t];
-            csv1 = MEASURE_DIR + CELL_LINE + "Mock_" + tp + "_" + m1 + "_in_" + combo + ".csv";
-            csv2 = MEASURE_DIR + CELL_LINE + "Mock_" + tp + "_" + m2 + "_in_" + combo + ".csv";
+            csv1 = MEASURE_DIR + CELL_LINE + "_mock_" + tp + "_" + m1 + "_in_" + combo + ".csv";
+            csv2 = MEASURE_DIR + CELL_LINE + "_mock_" + tp + "_" + m2 + "_in_" + combo + ".csv";
             if (!File.exists(csv1)) File.append(CSV_HEADER, csv1);
             if (!File.exists(csv2)) File.append(CSV_HEADER, csv2);
         }
     }
 }
+
 
 function listMockFiles() {
     files = getFileList(INPUT_DIR);
@@ -521,7 +522,7 @@ function measureAndWrite(marker, chTitle, cytoRoiId, nCyto,
     stats = computeTopStats(counts, nBins, nTotal, TOP_PCT);
     // stats = [thr, nTop, meanTop, medianTop, stdTop, p95, p99, p99_25, p99_5, p99_9]
 
-    csvPath = MEASURE_DIR + "Mock_" + tp + "_" + marker + "_in_" + comboKey + ".csv";
+    csvPath = MEASURE_DIR + CELL_LINE + "_mock_" + tp + "_" + marker + "_in_" + comboKey + ".csv";
     appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, marker, stats, nCyto);
 }
 
@@ -607,7 +608,7 @@ function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
 
 function saveMasksTif(imgName) {
     masksDir = MEASURE_DIR_RUN_ID + "masks" + File.separator;
-    filename = RUN_ID + imgName;
+    filename = RUN_ID + "_" + imgName;
     selectWindow("Cell_Mask");    saveAs("Tiff", masksDir + filename + "_cell.tif");
     selectWindow("Nucleus_Mask"); saveAs("Tiff", masksDir + filename + "_nuc.tif");
     selectWindow("Cytosol_Mask"); saveAs("Tiff", masksDir + filename + "_cyto.tif");
@@ -615,7 +616,7 @@ function saveMasksTif(imgName) {
 
 function saveQcOverlay(imgName, m1) {
     qcDir = MEASURE_DIR_RUN_ID  + "qc" + File.separator;
-    filename = RUN_ID + imgName + "_qc.png";
+    filename = RUN_ID + "_" + imgName + "_qc.png";
     src = m1 + "_channel";
     if (!isOpen(src)) return;
     selectWindow(src);
