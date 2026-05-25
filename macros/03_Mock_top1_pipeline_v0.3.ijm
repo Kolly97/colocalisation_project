@@ -29,9 +29,10 @@
 // Set during main
 var INPUT_DIR;
 var MEASURE_DIR;
+var MEASURE_DIR_RUN_ID;
 var RUN_ID;
 var MODE;        // "filename" or "dialog"
-var THR_MODUS; 	// "manual"or "automatic"
+var THR_MODE; 	// "manual"or "automatic"
 var CELL_LINE;   // dialog mode: set at startup; filename mode: per image (overwritten)
 
 // Lists used by CSV setup and per-image dialog
@@ -60,7 +61,7 @@ var MACRO_VERSION = "0.3.1";
 // CSV header (must match appendCsvRow order)
 var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
                + "stat_method,top_pct,"
-               + "macro_modus,threshold_modus,"
+               + "macro_mode,threshold_mode,"
                + "threshold_value,n_top_pixels,n_cyto_pixels,"
                + "mean_top,median_top,std_top,"
                + "p95,p99,p99_25,p99_5,p99_9,"
@@ -84,8 +85,8 @@ print("Cell line (startup): " + CELL_LINE);
 print("Markers   : " + arrToStr(MARKERS));
 print("Combos    : " + arrToStr(ANALYSE_COMBI));
 print("Timepoints: " + arrToStr(TIMEPOINTS));
-print("Script Modus: " + MODUS);
-print("Threshold Modus" + THR_MODUS);
+print("Script Mode: " + MODE);
+print("Threshold Mode: " + THR_MODE);
 print("Found " + mockFiles.length + " mock .tif files.");
 
 // No batch mode in v0.3 — dialogs need a visible GUI and you
@@ -106,7 +107,7 @@ function chooseInputDir() {
 }
 
 // Two-step startup dialog.
-//   Step 1: pick mode (filename / dialog) and Threshold modus (manual / automatic)
+//   Step 1: pick mode (filename / dialog) and Threshold mode (manual / automatic)
 //   Step 2 (dialog mode only): edit CELL_LINE/MARKERS/COMBOS/TIMEPOINTS.
 function askModeAndConfig() {
     // ---- Step 1: mode ----
@@ -120,7 +121,7 @@ function askModeAndConfig() {
         newArray("manual", "automatic"), 2, 1, "automatic");
     Dialog.show();
     MODE = Dialog.getRadioButton();
-    THR_MODUS = Dialog.getRadioButton();
+    THR_MODE = Dialog.getRadioButton();
 
     // ---- Step 2: config (only in dialog mode) ----
     // In filename mode the var defaults at the top of the file
@@ -155,10 +156,13 @@ function makeRunId() {
 function buildOutputDir() {
     MEASURE_DIR = INPUT_DIR + "measure_mock" + File.separator;
     if (!File.exists(MEASURE_DIR)) File.makeDirectory(MEASURE_DIR);
-    if (SAVE_MASKS && !File.exists(MEASURE_DIR + "masks"))
-        File.makeDirectory(MEASURE_DIR + "masks");
-    if (SAVE_QC && !File.exists(MEASURE_DIR + "qc"))
-        File.makeDirectory(MEASURE_DIR + "qc");
+    MEASURE_DIR_RUN_ID = MEASURE_DIR + RUN_ID + File.separator;
+    if (SAVE_MASKS && !File.exists(MEASURE_DIR_RUN_ID))
+    	File.makeDirectory(MEASURE_DIR_RUN_ID);
+    if (SAVE_MASKS && !File.exists(MEASURE_DIR_RUN_ID + "masks"))
+    	File.makeDirectory(MEASURE_DIR_RUN_ID + "masks");
+    if (SAVE_QC && !File.exists(MEASURE_DIR_RUN_ID + "qc"))
+        File.makeDirectory(MEASURE_DIR_RUN_ID + "qc");
 }
 
 // Create one CSV per (timepoint, combo, marker), header on first
@@ -170,8 +174,8 @@ function initCsvFiles() {
         m1 = parts[0]; m2 = parts[1];
         for (t = 0; t < TIMEPOINTS.length; t++) {
             tp = TIMEPOINTS[t];
-            csv1 = MEASURE_DIR + "Mock_" + tp + "_" + m1 + "_in_" + combo + ".csv";
-            csv2 = MEASURE_DIR + "Mock_" + tp + "_" + m2 + "_in_" + combo + ".csv";
+            csv1 = MEASURE_DIR + CELL_LINE + "Mock_" + tp + "_" + m1 + "_in_" + combo + ".csv";
+            csv2 = MEASURE_DIR + CELL_LINE + "Mock_" + tp + "_" + m2 + "_in_" + combo + ".csv";
             if (!File.exists(csv1)) File.append(CSV_HEADER, csv1);
             if (!File.exists(csv2)) File.append(CSV_HEADER, csv2);
         }
@@ -259,12 +263,12 @@ function processOneImage(fname) {
     print("  Cell-Mask source: " + cellSrc);
 
     // ---- masks --------------------------------------------
-    if (THR_MODUS == "automatic") {
+    if (THR_MODE == "automatic") {
 	    makeCellMask(cellSrc);
 	    makeNucleusMask("DAPI_channel");
     }
     
-    if (THR_MODUS == "manual") {
+    if (THR_MODE == "manual") {
 	    makeCellMaskManual(cellSrc);
 	    makeNucleusMaskManual("DAPI_channel");
     }
@@ -591,7 +595,7 @@ function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
                       stats, nCyto) {
     line = imgName + "," + cellLine + "," + tp + "," + comboKey + "," + channel
         + "," + STAT_METHOD + "," + TOP_PCT
-        + "," + MODUS + "," + THR_MODUS
+        + "," + MODE + "," + THR_MODE
         + "," + stats[0] + "," + stats[1] + "," + nCyto
         + "," + stats[2] + "," + stats[3] + "," + stats[4]
         + "," + stats[5] + "," + stats[6] + "," + stats[7] + "," + stats[8] + "," + stats[9]
@@ -602,29 +606,29 @@ function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
 }
 
 function saveMasksTif(imgName) {
-    masksDir = MEASURE_DIR + RUN_ID + "masks" + File.separator;
-    selectWindow("Cell_Mask");    saveAs("Tiff", masksDir + RUN_ID + "_" + imgName + "_cell.tif");
-    selectWindow("Nucleus_Mask"); saveAs("Tiff", masksDir + RUN_ID + "_" + imgName + "_nuc.tif");
-    selectWindow("Cytosol_Mask"); saveAs("Tiff", masksDir + RUN_ID + "_" + imgName + "_cyto.tif");
+    masksDir = MEASURE_DIR_RUN_ID + "masks" + File.separator;
+    filename = RUN_ID + imgName;
+    selectWindow("Cell_Mask");    saveAs("Tiff", masksDir + filename + "_cell.tif");
+    selectWindow("Nucleus_Mask"); saveAs("Tiff", masksDir + filename + "_nuc.tif");
+    selectWindow("Cytosol_Mask"); saveAs("Tiff", masksDir + filename + "_cyto.tif");
 }
 
 function saveQcOverlay(imgName, m1) {
-    qcDir = MEASURE_DIR + RUN_ID + "qc" + File.separator;
+    qcDir = MEASURE_DIR_RUN_ID  + "qc" + File.separator;
+    filename = RUN_ID + imgName + "_qc.png";
     src = m1 + "_channel";
     if (!isOpen(src)) return;
-
     selectWindow(src);
     run("Duplicate...", "title=qc_tmp");
     run("Enhance Contrast", "saturated=0.35");
     run("8-bit");
-
     selectWindow("Cytosol_Mask");
     run("Create Selection");
     selectWindow("qc_tmp");
     run("Restore Selection");
     run("Add Selection...");
     run("Flatten");
-    saveAs("PNG", qcDir + RUN_ID + "_" imgName + "_qc.png");
+    saveAs("PNG", qcDir + filename);
     close();   // close the flattened (now active after saveAs)
     if (isOpen("qc_tmp")) { selectWindow("qc_tmp"); close(); }
 }
