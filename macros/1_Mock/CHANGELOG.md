@@ -2,6 +2,17 @@
 
 ---
 
+| Version | Short description                                            |
+| ------- | ------------------------------------------------------------ |
+| v0.1.0  | Initial Mock Top-1% cytosol intensity pipeline with batch processing, cytosol masks, CSV export, and QC outputs. |
+| v0.2.0  | Added flexible metadata handling with filename/dialog mode and fixed 16-bit Top-1% histogram calculation. |
+| v0.3.0  | Added manual threshold mode for cell and nucleus masks and run-specific CSV export. |
+| v0.4.0  | Added artifact exclusion, cytosol particle-size filtering, and cell-line-specific defaults. |
+| v0.4.1  | Strengthened artifact handling, added extra high-percentile outputs, and saved full FIJI log files. |
+| v0.5.0  | Added composite RGB JPG QC export and improved binary mask stability with repeated BlackBackground pinning. |
+
+---
+
 ## v0.1.0
 
 ### Description
