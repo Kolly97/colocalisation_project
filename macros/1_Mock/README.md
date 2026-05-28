@@ -1,30 +1,57 @@
-# Mock Top-X% Pipeline
+# README for 01_Mock_background_pipeline_ijm
 
 Fiji/ImageJ macro that measures the **Top X% brightest pixel statistics inside the
-cytosol** of each marker channel in Mock immunofluorescence images. The per-image
-values feed into the downstream background-subtraction script (`2_SubBg/`).
+cytosol** of each marker channel in Mock immunofluorescence images. The per‑image
+percentile values are aggregated downstream into the background values used by
+the second script (`2_SubBg_Coloc/`).
 
-> **Script:** `03_Mock_top1_pipeline_v0.3.ijm`
-> **Version:** `0.3.1` · **Status:** in active use
+> **Script (current):** `01_Mock_pipeline.ijm`
+> **Version:** `0.5.0` · **Status:** active
+> **Version history:** see [`CHANGELOG.md`](CHANGELOG.md) for all previous
+> versions and the changes between them. Older script files
+> (Version 0.1 - 0.4.1.) are kept in the repository on GitHub for traceability.
 
 ---
 
-## What it does
+## Where this script sits in the workflow
 
-For each `Mock` `.tif` in an input folder, the macro:
+```
+   raw .tif (Mock + MOI mixed)
+            │
+            │  ── only Mock images are processed ──
+            ▼
+   ┌──────────────────────────────────┐
+   │ THIS SCRIPT  (01_Mock_pipeline)  │  ← top‑X% statistics in cytosol
+   └──────────────────────────────────┘
+            │
+            │  per‑image CSVs (one row per image × marker)
+            ▼
+   manual aggregation (see "What to do with the output" below)
+            │
+            │  one background value per (cell line × tp × combo × marker)
+            ▼
+   ┌──────────────────────────────────┐
+   │ 2_SubBg_Coloc/ — subtract bg     │  ← values typed into its startup dialog
+   └──────────────────────────────────┘
+```
 
-1. Parses metadata from the filename (or asks via dialog).
-2. Builds a **cytosol mask** = (cell mask − nucleus mask) from one cytoplasmic
-   marker and DAPI.
-3. Inside that cytosol, takes a **histogram** of each marker channel and computes
-   statistics over the top X % brightest pixels (mean, median, std, several
-   percentiles, plus the threshold value at which the top-X% pool starts).
-4. Writes one row per (image × marker) into a per-(timepoint × combo) CSV.
-5. Optionally saves the three binary masks (TIF) and a QC overlay (PNG) for each
-   image, so the segmentation can be reviewed visually.
+---
 
-These CSVs are aggregated (median over images) downstream to derive per-channel
-background values used in `2_SubBg/`.
+## What it does (in one paragraph)
+
+For each `Mock`‑containing `.tif` in the chosen input folder, the macro splits
+the channels, builds **cell**, **nucleus** and **cytosol** masks, cleans the
+cytosol mask of bright artefacts and small disconnected fragments, and then
+measures inside that cytosol the **histogram of each marker channel**. From
+the histogram it computes the top‑X% statistics (mean, median, std, threshold
+value at which the top‑X% pool starts) plus a series of whole‑cytosol
+percentiles (p95 … p99.9999) used for sanity / outlier detection. One row per
+(image × marker) is appended to a per‑(timepoint × combo) CSV.
+
+For visual review it also saves the three binary masks (cell / nucleus /
+cytosol / artefact) as TIFs, a single‑channel **QC PNG** with the cytosol
+outline overlay, and an **8‑bit RGB composite JPG** with all three channels +
+cytosol outline for cross‑channel verification.
 
 ---
 
@@ -34,38 +61,28 @@ background values used in `2_SubBg/`.
 |---|---|---|
 | Fiji | ≥ 2.16.0 | bundled ImageJ ≥ 1.54p |
 
-No additional plugins, no update sites required.
+No additional plugins or update sites required.
 
 ---
 
 ## Input format
 
-### Folder
+A folder with `.tif` images. Only files whose filename contains `mock`
+(case‑insensitive) are processed; everything else is skipped automatically.
 
-A folder containing Mock (and optionally MOI) `.tif` images. Only files whose
-filename contains `mock` (case-insensitive) are processed; everything else is
-skipped automatically.
-
-### Filename schema (positional, strict)
-
+Filename schema (positional, strict):
 ```
 <timepoint>_<cellLine>_<condition>_<marker1>_<marker2>_<coverslip>_<imgIndex>.tif
 ```
+Example: `12h_Huh7_Mock_HA568_dsRNA488_CS1_1.tif`
 
-Example:
-```
-12h_Huh7_Mock_HA568_dsRNA488_CS1_1.tif
-```
-
-Token positions are fixed:
-
-| Position | Token | Allowed values (default config) |
+| Position | Token | Allowed defaults |
 |---|---|---|
 | 0 | timepoint | `12h`, `24h` |
 | 1 | cell line | `Huh7`, `VeroE6` |
 | 2 | condition | `Mock`, `MOI1`, `MOI5` |
 | 3 | marker 1 (→ C1) | `HA568`, `HA488`, `dsRNA488`, `NS4B568` |
-| 4 | marker 2 (→ C2) | same set as marker 1, must differ |
+| 4 | marker 2 (→ C2) | same set, must differ from marker 1 |
 | 5 | coverslip | starts with `CS` |
 | 6 | image index | integer |
 
@@ -73,173 +90,104 @@ Token positions are fixed:
 
 ---
 
-## Step-by-step usage
+## Quick start
 
 1. Open Fiji.
-2. **Plugins → Macros → Edit…** → open
-   `macros/1_Mock/03_Mock_top1_pipeline_v0.3.ijm`.
-3. Click **Run** (or `Cmd/Ctrl + R`).
-4. **Folder dialog**: pick the folder with your `.tif` images.
-5. **Pipeline mode dialog** asks three things:
-
-   | Question | Options | Meaning |
-   |---|---|---|
-   | Mode | `filename` / `dialog` | parse from filename, or ask per image |
-   | Threshold modus | `automatic` / `manual` | use auto-threshold, or pause per image to adjust the slider |
-   | Cell line | `Huh7` / `VeroE6` | applied to all images in the run |
-
-6. **(dialog mode only)** A second dialog lets you edit the marker/combo/timepoint
-   lists for this specific run. Comma-separated, whitespace is trimmed.
-
-7. The macro loops through every Mock image, prints progress to the **Log**
-   window, and writes outputs into a freshly created subfolder of the input
-   folder.
-
-8. When done, the Log shows `=== DONE ===`. Open any of the resulting CSV files
-   in Excel / pandas / R to inspect.
-
-### Manual threshold mode — what to expect
-
-When `Threshold modus = manual`, the macro pauses twice per image:
-- once on the cell mask, with the Threshold dialog open (adjust slider, click
-  OK on the "Check and adjust…" dialog),
-- once on the nucleus mask (same).
-
-After your OK click, the macro applies the chosen threshold and continues.
-Use this mode for a few test images, then switch to `automatic` for the full run.
+2. **Plugins → Macros → Edit…** → open `macros/1_Mock/01_Mock_pipeline.ijm`.
+3. **Run** (`Cmd/Ctrl + R`).
+4. Folder dialog → pick the folder with your `.tif` images.
+5. Mode dialog → choose:
+   - **Mode**: `filename` (parse from name) or `dialog` (ask per image)
+   - **Threshold mode**: `automatic` or `manual`
+   - **Cell line**: `Huh7` or `VeroE6` (applies tuned defaults)
+6. Macro loops over all Mock images and writes outputs into
+   `<input>/measure_mock/<RUN_ID>/` (one subfolder per run, timestamped).
+7. When the Log shows `=== DONE ===`, the CSVs, masks, QC PNGs, composite JPGs
+   and a copy of the Log are all in that subfolder.
 
 ---
 
-## Output
+## What to do with the output (manual aggregation step)
 
-Inside the chosen input folder:
+The CSVs are **per‑image** values. To use them as a background value in the next
+script, you have to aggregate them per `(cell line × timepoint × combo × marker)`
+group. Recommended procedure:
+
+1. Open the relevant CSV in Excel / pandas / R. Each row is one Mock image.
+2. **Pick the `p99_9995` column** as the background value source.
+   - This is the 99.9995% percentile of the cytosol pixel intensities — the
+     upper tail of Mock autofluorescence, but robust to the very last few
+     outlier pixels (which `p99.9999` or `max` would be sensitive to).
+   - Below this percentile is "typical Mock background"; above it is mostly
+     artefacts and the very last noise spikes. Subtracting this from infected
+     samples gives a conservative, defensible background floor.
+3. Compute the **median of `p99_9995` across all images** in the group.
+   - Median (not mean) because a single bad image with a stray bright spot
+     should not move the threshold.
+4. Note that median value for each `(cell line, timepoint, combo, marker)`.
+
+You'll end up with one table — typically 12 entries for our current setup
+(2 timepoints × 3 combos × 2 markers per combo).
+
+5. Start the second script (`02_background_subtraction_coloc_pipeline.ijm`). When the **Background values** dialog opens, type these median values into the matching fields.
+   That dialog is built dynamically from the same `TIMEPOINTS × ANALYSE_COMBI`
+   lists, so the field labels match the CSV groups one‑to‑one.
+
+---
+
+## Output structure (brief)
 
 ```
 measure_mock/
-└── <RUN_ID>/                              # e.g. 20260526_1535
+└── <RUN_ID>/                                  # e.g. 20260527_2243
     ├── <CellLine>_mock_<tp>_<marker>_in_<combo>.csv
-    │   ...  (12 CSV files = 2 timepoints × 3 combos × 2 markers)
+    │   ...   (one CSV per timepoint × combo × marker)
     ├── masks/
     │   ├── <RUN_ID>_<imgname>_cell.tif
     │   ├── <RUN_ID>_<imgname>_nuc.tif
-    │   └── <RUN_ID>_<imgname>_cyto.tif
-    └── qc/
-        └── <RUN_ID>_<imgname>_qc.png      # marker1 + cytosol outline
+    │   ├── <RUN_ID>_<imgname>_cyto.tif
+    │   └── <RUN_ID>_<imgname>_artifact.tif
+    ├── qc/
+    │   ├── <RUN_ID>_<imgname>_qc.png          # single channel + cytosol outline
+    │   └── <RUN_ID>_<imgname>_composite.jpg   # 3‑channel RGB + cytosol outline
+    └── macro_log_<RUN_ID>.txt
+    └── mock_analysis/
+    		└── <CellLine>_mock_background_analysis.csv
 ```
 
-### CSV columns
-
-| Column | Meaning |
-|---|---|
-| `image`, `cell_line`, `timepoint`, `combo`, `channel` | metadata of the row |
-| `stat_method`, `top_pct` | bookkeeping (`median_top_hist`, `1.0`) |
-| `macro_mode`, `threshold_mode` | what mode was used for this run |
-| `threshold_value` | pixel intensity at which the top-X% pool starts |
-| `n_top_pixels`, `n_cyto_pixels` | size of the top pool and the cytosol |
-| `mean_top`, `median_top`, `std_top` | statistics of the top pool |
-| `p95 … p99_999` | whole-cytosol percentiles (sanity / outlier detection) |
-| `cell_thr_method`, `nuc_thr_method`, `blur_sigma_*` | mask parameters |
-| `macro_version`, `run_id` | provenance |
-
-The `run_id` column lets you mix outputs of multiple runs in the same CSV and
-filter them later in pandas:
-```python
-df[df.run_id == "20260526_1535"]
-```
-
-### QC PNG — what to check
-
-The PNG shows the marker-1 channel auto-contrasted, with a yellow outline of the
-cytosol ROI. Verify visually:
-
-1. The outline **follows the cells** (no big chunks missed, no empty background).
-2. **Nuclei are excluded** (no closed loops around the dark central holes).
-3. **No obvious debris** is inside the outline.
-
-If the outline is consistently wrong → tune the threshold / blur parameters
-(see the next section).
+The QC files exist to verify visually that the cytosol mask is correct — that
+artefacts are excluded, that nuclei are excluded, that the outline follows the
+real cell shape. **Always look at a handful** before trusting a CSV.
 
 ---
 
 ## Configuration: what to change when samples change
 
-All tunable values live in the `// ============== 1. CONFIG` block at the top of
-the script. Change them **there** (never inside functions).
+All tunable parameters live in the `// CONFIG` block at the top of the script.
 
-| Change | Variable to edit | Example |
-|---|---|---|
-| **New cell line** (e.g. A549) | `Cell Line:` radio in `askModeAndConfig` (≈ line 123) | add `"A549"` to the array, adjust the `rows, cols` of the radio group |
-| **New timepoint** (e.g. 48h) | `TIMEPOINTS` | `newArray("12h", "24h", "48h")` |
-| **New marker** (e.g. NS5A647) | `MARKERS` **and** `ANALYSE_COMBI` | add the marker to MARKERS, add new combos (e.g. `"NS5A647_dsRNA488"`) to ANALYSE_COMBI |
-| **Different top-X%** | `TOP_PCT` | `0.5` for top 0.5%, `5.0` for top 5% |
-| **Different cell threshold method** | `CELL_THR_METHOD` | `"Triangle"` (more permissive), `"Yen"` (more conservative) |
-| **Different nucleus threshold method** | `NUC_THR_METHOD` | `"Triangle"` if Otsu cuts off |
-| **More / less smoothing on cell mask** | `BLUR_SIGMA_CELL` | `2` for more smoothing (in µm), `0.5` for less |
-| **Stronger / weaker nucleus closing** | `NUC_CLOSE_ITER` | `3` for stubborn boundary gaps, `0` to disable |
-| **Don't save masks / QC** | `SAVE_MASKS`, `SAVE_QC` | `false` for fast batch runs |
+| Change | Variable to edit |
+|---|---|
+| New cell line (e.g. A549) | add option to `Cell line` radio in `askModeAndConfig`, add an `else if` branch in `applyCellLineDefaults` |
+| New timepoint (e.g. 48h) | `TIMEPOINTS` |
+| New marker | `MARKERS` **and** `ANALYSE_COMBI` (add at least one combo using it) |
+| Different top‑X% | `TOP_PCT` |
+| Different threshold method | `CELL_THR_METHOD`, `NUC_THR_METHOD` |
+| Stricter / more permissive cell mask | `CELL_THR_FACTOR` (lower = more permissive) |
+| Artefact upper cutoff | `ARTIFACT_UPPER_BOUND` (per‑cell‑line in `applyCellLineDefaults`) |
+| Min disconnected region size | `MIN_PARTICLE_SIZE` |
 
-After any change, bump `MACRO_VERSION` (e.g. `"0.3.2"`) so the provenance column
-distinguishes runs made with the new settings.
-
-### Adding a new channel order
-
-If a future dataset has C1 = DAPI instead of C3 = DAPI, edit
-`splitAndRenameChannels` (≈ line 372). Only that one function — the rest of the
-script references markers by name, not channel number.
-
-### Adding columns to the CSV
-
-Three coordinated changes, all in this file:
-1. `CSV_HEADER` (line 62) — add the new column name in the right position.
-2. `computeTopStats` — compute and return the new value as part of the stats
-   array.
-3. `appendCsvRow` — concatenate the new value at the matching position.
-
-Out-of-sync changes silently misalign columns. After editing, run a test image
-and open the resulting CSV in Excel to verify the header / data align.
+After any change, bump `MACRO_VERSION` so the provenance column in the CSV
+distinguishes runs made with the new settings, and add the change to
+`CHANGELOG.md`.
 
 ---
 
-## Common issues
+## Note on documentation
 
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| Macro silently skips every image | Filenames don't contain `mock` (case-insensitive) | rename to follow the schema |
-| `SKIP: combo not in ANALYSE_COMBI` | A `marker1_marker2` combo isn't whitelisted | add it to `ANALYSE_COMBI` or rename the file |
-| `SKIP: cytosol mask empty` | Cell mask and nucleus mask had identical foreground | use Triangle for cell mask, or check thresholding visually (manual mode) |
-| Cell mask too small (cells cut off) | Threshold too strict | switch `CELL_THR_METHOD` to `Triangle`, or lower `BLUR_SIGMA_CELL` |
-| Cell mask too large (background included) | Threshold too lenient | switch `CELL_THR_METHOD` to `Yen` or `Otsu` |
-| Nuclei have "bites" (open holes) | Boundary gaps prevent Fill Holes | increase `NUC_CLOSE_ITER` to `3` or `4` |
-| `Array expected` error in Log | IJM type quirk (rare) — usually `return userFunction(...)` somewhere | report; fix is intermediate variable pattern |
+This README is a **high‑level overview**. A separate `USAGE.md` is planned with
+detailed step‑by‑step instructions. For further questions contact Kolja Hildenbrand
 
-When in doubt, switch to `Threshold modus = manual` for a few images and watch
-the masks build live — the Log window shows the cell-mask source, threshold
-values used, and skip reasons line by line.
-
----
-
-## Reproducibility note
-
-Every CSV row records `macro_version` and `run_id`, plus the mask parameters in
-effect (`cell_thr_method`, `blur_sigma_cell`, etc.). To reproduce an analysis
-six months from now:
-
-1. Note the `run_id` and `macro_version` from the CSV row of interest.
-2. Check out the matching version of the script from git.
-3. Re-run on the same images — the values should be identical (deterministic
-   pipeline).
-
-The `RUN_ID` is also part of the output folder name, so multiple parallel runs
-on the same input never overwrite each other.
-
----
-
-## File locations in this repo
-
-```
-macros/
-└── 1_Mock/
-    ├── 03_Mock_top1_pipeline_v0.3.ijm        # the macro
-    └── README.md                              # this file
-```
+> [!IMPORTANT]
+>
+> Kolja.Hildenbrand@gmail.com
 
