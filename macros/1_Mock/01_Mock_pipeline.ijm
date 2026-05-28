@@ -1,32 +1,34 @@
 // ==========================================================
-// Mock Top-X% Pipeline  --  V0.4.1.
-// Author : Kolja Hildenbrand
-// Date   : 2026-05-27
-// Status	: OLD
+// Mock Top-X% Pipeline  --  V0.5
+// Author 	: Kolja Hildenbrand
+// Date   	: 2026-05-27
+// Status	: Current
 //
-// Changes vs V0.4:
+// Changes vs v4.1.:
 // ==========================================================
-//  - NEW:   Added artifact-mask dilation via ARTIFACT_DILATE_ITER.
-//           Artifact regions are now expanded before exclusion.
+//  - NEW:   Added composite JPG QC export via saveCompositeJpg().
+//           Saves merged RGB images with marker1, marker2, DAPI,
+//           and cytosol ROI outline.
 //
-//  - CHANGE: Stronger artifact exclusion defaults.
-//            ARTIFACT_UPPER_BOUND lowered from 4000 to 2000,
-//            ARTIFACT_DILATE_ITER increased from 2 to 20.
+//  - NEW:   Added SAVE_COMPOSITE_JPG output option.
 //
-//  - NEW:   Added extra high-percentile intensity outputs:
-//           p99_9995 and p99_9999.
+//  - FIX:   Re-pins BlackBackground = true globally, per image,
+//           and after composite saving to prevent inverted binary masks.
 //
-//  - NEW:   Added saveLogToFile() to save the full FIJI Log
-//           after each run for reproducibility and debugging.
+//  - FIX:   Composite JPG creation now duplicates source channels
+//           before merging, avoiding LUT/display-state side effects
+//           on the original channel windows.
 //
-//  - CHANGE: Updated VeroE6 default settings:
-//            CELL_THR_FACTOR 0.3 -> 0.4,
-//            BLUR_SIGMA_CELL 1.5 -> 1.
+//  - CHANGE: Composite JPGs are saved before mask TIFFs to keep
+//            original channel windows available.
 //
-//  - CHANGE: CSV output updated with additional percentile columns.
+//  - CHANGE: Updated cell-line defaults:
+//            VeroE6 artifact upper bound = 1000,
+//            Huh7 artifact upper bound = 2000.
 //
 //  - REMOVE: No major functionality removed.
 // ==========================================================
+
 
 // ============== 1. CONFIG (globals via `var`) ==============
 
@@ -77,11 +79,12 @@ var TOP_PCT     = 1.0;
 var STAT_METHOD = "median_top_hist";
 
 // Output flags
-var SAVE_QC    = true;
-var SAVE_MASKS = true;
+var SAVE_QC            = true;   // single-channel marker1 + cytosol outline (PNG)
+var SAVE_MASKS         = true;   // binary mask TIFs (cell, nuc, cyto, artifact)
+var SAVE_COMPOSITE_JPG = true;   // 3-channel composite + cytosol outline (JPG)
 
 // Reproducibility
-var MACRO_VERSION = "0.4.1";
+var MACRO_VERSION = "0.5.0";
 
 // CSV header — columns added in V0.4 marked with /* V0.4 */
 var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
@@ -97,6 +100,14 @@ var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
 
 
 // ============== MAIN =======================================
+
+// CRITICAL: pin the "Black Background" binary option ON.
+// Without this, Convert to Mask can silently invert (foreground=0
+// instead of 255) — depending on Fiji's prior state and on side
+// effects of Merge Channels / Stack to RGB. We set it once here
+// AND once per iteration (see processOneImage) to be bulletproof.
+setOption("BlackBackground", true);
+
 chooseInputDir();
 askModeAndConfig();   // also calls applyCellLineDefaults()
 RUN_ID = makeRunId();
@@ -177,15 +188,17 @@ function applyCellLineDefaults(cellLine) {
         //  - stronger smoothing (1.5 µm vs 1 µm)
         //  - smaller min particle size (100 vs 200)
         CELL_THR_METHOD   = "Li";
-        CELL_THR_FACTOR   = 0.4;
+        CELL_THR_FACTOR   = 0.5;
         BLUR_SIGMA_CELL   = 1;
         MIN_PARTICLE_SIZE = 100;
+        ARTIFACT_UPPER_BOUND = 1000;
     } else {
         // Default = Huh7
         CELL_THR_METHOD   = "Li";
         CELL_THR_FACTOR   = 0.5;
         BLUR_SIGMA_CELL   = 1;
         MIN_PARTICLE_SIZE = 200;
+        ARTIFACT_UPPER_BOUND = 2000;
     }
     print("Cell-line defaults applied for " + cellLine + ":");
     print("  CELL_THR_METHOD   = " + CELL_THR_METHOD);
@@ -203,6 +216,7 @@ function makeRunId() {
 }
 
 function buildOutputDir() {
+	
     MEASURE_DIR = INPUT_DIR + "measure_mock" + File.separator;
     if (!File.exists(MEASURE_DIR)) File.makeDirectory(MEASURE_DIR);
     MEASURE_DIR_RUN_ID = MEASURE_DIR + RUN_ID + File.separator;
@@ -245,6 +259,11 @@ function listMockFiles() {
 // ============== 3. PER-IMAGE PIPELINE ======================
 
 function processOneImage(fname) {
+    // Re-pin Black Background per iteration — paranoid defense against
+    // any side effect from save/cleanup operations that might have
+    // toggled the global binary state.
+    setOption("BlackBackground", true);
+
     open(INPUT_DIR + fname);
     title = getTitle();
     imgName = substring(title, 0, lastIndexOf(title, "."));
@@ -331,8 +350,14 @@ function processOneImage(fname) {
     measureAndWrite(m2, m2 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, imgName, cellLine, tp, comboKey);
 
     // ---- save artefacts -----------------------------------
-    if (SAVE_QC)    saveQcOverlay(imgName, m1);
-    if (SAVE_MASKS) saveMasksTif(imgName);
+    // Order matters: composite JPG must come BEFORE saveMasksTif,
+    // because saveMasksTif uses saveAs() which renames the mask
+    // windows — by then the m1/m2/DAPI channel windows are still
+    // intact, but if any later step closes them the composite
+    // wouldn't have the data to merge. Doing JPG first is safe.
+    if (SAVE_QC)            saveQcOverlay(imgName, m1);
+    if (SAVE_COMPOSITE_JPG) saveCompositeJpg(imgName, m1, m2);
+    if (SAVE_MASKS)         saveMasksTif(imgName);
 }
 
 function tryParseFilename(imgName) {
@@ -719,6 +744,100 @@ function saveQcOverlay(imgName, m1) {
     saveAs("PNG", qcDir + filename);
     close();
     if (isOpen("qc_tmp")) { selectWindow("qc_tmp"); close(); }
+}
+
+// ------------------------------
+// Save an 8-bit RGB composite JPG with all 3 channels merged and
+// the cytosol ROI drawn as outline. Lets you visually verify:
+//   - Artefacts in EITHER channel are excluded from the ROI
+//     (red dot inside ROI = uncaught m1 artefact; green dot inside
+//      ROI = uncaught m2 artefact)
+//   - Nuclei (blue) are cleanly outside the ROI
+//   - The cytosol mask follows the actual cell shape
+//
+// Conventional channel-to-color mapping for our data:
+//   c1=m1_channel  -> RED   (568 marker)
+//   c2=m2_channel  -> GREEN (488 marker)
+//   c3=DAPI        -> BLUE
+//
+// Key implementation details:
+//  - Merge Channels uses `keep` so the source windows aren't
+//    consumed; saveMasksTif and downstream cleanup still see them.
+//  - Stack.setDisplayMode("composite") -> all channels overlay
+//    in their LUT colors (what we want for visual QC).
+//  - Per-channel Enhance Contrast (saturated=0.35) is cosmetic
+//    — it adjusts each channel's display LUT so faint signal is
+//    visible. Does not change pixel data.
+//  - Stack to RGB flattens the composite into one 8-bit RGB image
+//    which is what JPG can store.
+//  - JPG quality 90 = good balance figure-quality vs file size.
+// ------------------------------
+function saveCompositeJpg(imgName, m1, m2) {
+    qcDir = MEASURE_DIR_RUN_ID + "qc" + File.separator;
+    jpgPath = qcDir + RUN_ID + "_" + imgName + "_composite.jpg";
+
+    // Defensive: we need all 3 source channels for the merge.
+    if (!isOpen(m1 + "_channel") || !isOpen(m2 + "_channel") || !isOpen("DAPI_channel")) {
+        print("  WARN: composite jpg skipped (missing channel window)");
+        return;
+    }
+
+    // CHANGED V0.5.1: instead of `Merge Channels ... keep` (which leaves
+    // the source channels alive but can subtly alter their LUTs / display
+    // metadata via Stack.setChannel + Enhance Contrast below), we
+    // DUPLICATE each source channel first and merge the duplicates
+    // WITHOUT keep. The originals are then guaranteed untouched —
+    // no shared state, no LUT leak, no risk of breaking the masks
+    // for the next iteration.
+    selectWindow(m1 + "_channel"); run("Select None"); run("Duplicate...", "title=c_m1_tmp");
+    selectWindow(m2 + "_channel"); run("Select None"); run("Duplicate...", "title=c_m2_tmp");
+    selectWindow("DAPI_channel");  run("Select None"); run("Duplicate...", "title=c_dapi_tmp");
+
+    // Merge the DUPLICATES — they get consumed (closed automatically),
+    // which is exactly what we want.
+    run("Merge Channels...", "c1=c_m1_tmp c2=c_m2_tmp c3=c_dapi_tmp create");
+    // Active window is now "Composite"
+
+    // Composite display mode: all channels visible at once in their LUTs.
+    Stack.setDisplayMode("composite");
+
+    // Per-channel auto-contrast so dim signal is visible in the JPG.
+    Stack.setChannel(1); run("Enhance Contrast", "saturated=0.35");
+    Stack.setChannel(2); run("Enhance Contrast", "saturated=0.35");
+    Stack.setChannel(3); run("Enhance Contrast", "saturated=0.35");
+
+    // Flatten the composite into a single 8-bit RGB image.
+    run("Stack to RGB");
+    // New active window: "Composite (RGB)"
+
+    // Overlay cytosol ROI. Use ROI Manager (index 0) — already added
+    // in processOneImage and not yet reset.
+    if (roiManager("count") > 0) {
+        roiManager("Select", 0);
+        run("Add Selection...");
+    }
+
+    // Burn overlay into pixel data so the JPG actually contains it.
+    run("Flatten");
+
+    // Save with high JPEG quality (figure-quality, ~3-5× smaller than PNG).
+    run("Options...", "jpeg=90");
+    saveAs("Jpeg", jpgPath);
+    print("  saved composite jpg -> " + jpgPath);
+
+    // Cleanup. The flattened+saved JPG window is active now → close.
+    // Composite (RGB) and Composite (the duplicate-based one) may
+    // still be open → close them. The original m1/m2/DAPI channels
+    // are completely untouched throughout this function.
+    close();
+    if (isOpen("Composite (RGB)")) { selectWindow("Composite (RGB)"); close(); }
+    if (isOpen("Composite"))       { selectWindow("Composite");       close(); }
+
+    // CRITICAL: re-pin Black Background. Stack to RGB / Merge Channels
+    // can flip this option as a side effect on some Fiji builds. If
+    // we don't re-pin here, the NEXT image's Convert to Mask might
+    // invert (foreground=0, background=255) → broken nucleus mask.
+    setOption("BlackBackground", true);
 }
 
 
