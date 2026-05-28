@@ -4,6 +4,10 @@
 *.czi
 *.lsm
 *.nd2
+*.xlsx
+*.xlsm
+# images 
+images/
 # Pipeline outputs
 measure_mock/
 qc/
