@@ -1,58 +1,76 @@
 // ==========================================================
-// Mock Top-X% Pipeline  --  V0.3
+// Mock Top-X% Pipeline  --  V0.4
 // Author 	: Kolja Hildenbrand
-// Date   	: 2026-05-25
+// Date   	: 2026-05-27
 // Status	: OLD
-//
-// Changes vs V0.2:
 // ==========================================================
-// Major changes vs v0.2:
-//  - NEW:   Added threshold mode selector: automatic vs manual.
-//
-//  - NEW:   Manual threshold workflow for cell and nucleus masks.
-//           The user can inspect and adjust thresholds before
-//           mask conversion.
-//
-//  - NEW:   Added makeCellMaskManual() and
-//           makeNucleusMaskManual().
-//
-//  - NEW:   Added threshold_mode to CSV output.
-//
-//  - CHANGE: processOneImage() now switches between automatic
-//            and manual mask generation based on THR_MODE.
-//
-//  - CHANGE: CSV files are now written into run-specific output
-//            folders and include the selected cell line in the name.
-//
-//  - REMOVE: No major functionality removed.
+// Changes vs V0.3:
+//  - NEW:   Artifact exclusion via upper-bound thresholding.
+//           Pixels with intensity > ARTIFACT_UPPER_BOUND in
+//           EITHER marker channel are removed from the cytosol
+//           mask — handles dust / coverslip contamination that
+//           would otherwise dominate the Top-X% statistic.
+//  - NEW:   Particle-size filter on cytosol mask. Disconnected
+//           regions smaller than MIN_PARTICLE_SIZE (px) are
+//           dropped — handles small bright fragments on the
+//           coverslip outside any real cell.
+//  - NEW:   Cell-line-specific defaults via applyCellLineDefaults.
+//           VeroE6 cells are ~4× smaller than Huh7 → more
+//           permissive threshold + smaller min particle size.
+//  - NEW:   CELL_THR_FACTOR multiplier — scales the auto-threshold
+//           lower bound for a more permissive cell mask.
+//  - NEW:   Artifact mask saved alongside cell/nucleus/cytosol
+//           masks for visual QC.
+//  - NEW:   CSV columns added: cell_thr_factor, artifact_upper_bound,
+//           min_particle_size, n_artifacts_excluded.
+//  - FIX:   isValidCombo uses intermediate variable (IJM quirk).
+//  - FIX:   CELL_LINE declared as single string, not array.
 // ==========================================================
 
 
 // ============== 1. CONFIG (globals via `var`) ==============
-// In dialog mode the startup dialog OVERWRITES the list-type
-// defaults below; in filename mode the defaults are used as-is.
-// -----------------------------------------------------------
 
-// Set during main
+// Runtime state
 var INPUT_DIR;
 var MEASURE_DIR;
 var MEASURE_DIR_RUN_ID;
 var RUN_ID;
-var MODE;        // "filename" or "dialog"
-var THR_MODE; 	// "manual"or "automatic"
-var CELL_LINE = newArray("Huh7", "VeroE6");// dialog mode: set at startup; filename mode: per image (overwritten)
+var MODE;             // "filename" or "dialog"
+var THR_MODE;         // "manual" or "automatic"
+var CELL_LINE = "Huh7";  // overwritten by dialog
 
 // Lists used by CSV setup and per-image dialog
 var MARKERS       = newArray("HA568", "HA488", "dsRNA488", "NS4B568");
 var ANALYSE_COMBI = newArray("HA568_dsRNA488", "NS4B568_dsRNA488", "NS4B568_HA488");
 var TIMEPOINTS    = newArray("12h", "24h");
 
-// Thresholding
-var CELL_THR_METHOD = "Li";    // try: Li, Otsu, Triangle, Yen
-var NUC_THR_METHOD  = "Otsu";  // try: Otsu, Triangle
-var BLUR_SIGMA_CELL = 1;       // in MICROMETERS (Gaussian "scaled")
-var BLUR_SIGMA_NUC  = 1;       // in MICROMETERS (Gaussian "scaled")
-var NUC_CLOSE_ITER  = 2;       // morphological closing passes for nucleus
+// Thresholding — these become overwritten by applyCellLineDefaults()
+var CELL_THR_METHOD  = "Li";  // Li | Otsu | Triangle | Yen
+var NUC_THR_METHOD   = "Otsu";      // Otsu | Triangle
+var BLUR_SIGMA_CELL  = 1;           // micrometers (Gaussian "scaled")
+var BLUR_SIGMA_NUC   = 1;
+var NUC_CLOSE_ITER   = 2;
+
+// CELL_THR_FACTOR (NEW V0.4): the auto-threshold's lower bound is MULTIPLIED
+// by this before binarisation. 1.0 = use as-is. < 1.0 = MORE permissive
+// (lower threshold = more pixels classified as cell). Critical for Vero
+// where the auto method is too conservative on dim periphery.
+var CELL_THR_FACTOR  = 0.5;
+
+// ARTIFACT EXCLUSION (NEW V0.4)
+// Pixels with intensity > ARTIFACT_UPPER_BOUND are treated as artifacts
+// (dust, fluorescent debris). Detected in EACH marker channel separately,
+// then ORed together so contamination in either channel is excluded from
+// the cytosol mask. Tune per dataset — real biology in Mock samples
+// typically peaks well below this.
+var ARTIFACT_UPPER_BOUND = 4000;
+var ARTIFACT_DILATE_ITER = 2;       // expand artifact slightly to catch the rim
+
+// PARTICLE-SIZE FILTER (NEW V0.4)
+// Cytosol regions smaller than this (in PIXELS) are dropped after the
+// cytosol mask is built. Catches isolated bright dots on the coverslip
+// outside any real cell that passed thresholding by accident.
+var MIN_PARTICLE_SIZE = 200;
 
 // Top-percentile measurement
 var TOP_PCT     = 1.0;
@@ -63,23 +81,24 @@ var SAVE_QC    = true;
 var SAVE_MASKS = true;
 
 // Reproducibility
-var MACRO_VERSION = "0.3.1";
+var MACRO_VERSION = "0.4.0";
 
-// CSV header (must match appendCsvRow order)
+// CSV header — columns added in V0.4 marked with /* V0.4 */
 var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
                + "stat_method,top_pct,"
                + "macro_mode,threshold_mode,"
-               + "threshold_value,n_top_pixels,n_cyto_pixels,"
+               + "threshold_value,n_top_pixels,n_cyto_pixels,n_artifacts_excluded," /* V0.4 */
                + "mean_top,median_top,std_top,"
                + "p95,p99,p99_25,p99_5,p99_9,p99_95,p99_99,p99_995,p99_999,"
-               + "cell_thr_method,nuc_thr_method,"
+               + "cell_thr_method,nuc_thr_method,cell_thr_factor," /* V0.4 */
                + "blur_sigma_cell,blur_sigma_nuc,"
+               + "artifact_upper_bound,min_particle_size," /* V0.4 */
                + "macro_version,run_id\n";
 
 
 // ============== MAIN =======================================
 chooseInputDir();
-askModeAndConfig();   // may overwrite MODE/CELL_LINE/MARKERS/ANALYSE_COMBI/TIMEPOINTS
+askModeAndConfig();   // also calls applyCellLineDefaults()
 RUN_ID = makeRunId();
 buildOutputDir();
 mockFiles = listMockFiles();
@@ -87,23 +106,23 @@ initCsvFiles();
 
 print("=== Mock pipeline V" + MACRO_VERSION + " | run_id=" + RUN_ID + " | mode=" + MODE + " ===");
 print("Input  : " + INPUT_DIR);
-print("Output : " + MEASURE_DIR);
-print("Cell line (startup): " + CELL_LINE);
+print("Output : " + MEASURE_DIR_RUN_ID);
+print("Cell line: " + CELL_LINE);
 print("Markers   : " + arrToStr(MARKERS));
 print("Combos    : " + arrToStr(ANALYSE_COMBI));
 print("Timepoints: " + arrToStr(TIMEPOINTS));
-print("Script Mode: " + MODE);
-print("Threshold Mode: " + THR_MODE);
+print("Threshold mode: " + THR_MODE);
+print("Artifact upper bound: " + ARTIFACT_UPPER_BOUND);
+print("Min particle size  : " + MIN_PARTICLE_SIZE);
 print("Found " + mockFiles.length + " mock .tif files.");
 
-// No batch mode in v0.3 — dialogs need a visible GUI and you
-// want to see the masks anyway while testing.
 for (f = 0; f < mockFiles.length; f++) {
     print("[" + (f+1) + "/" + mockFiles.length + "] " + mockFiles[f]);
     processOneImage(mockFiles[f]);
     cleanupBetweenImages();
 }
 print("=== DONE ===");
+saveLogToFile();   // persist full IJ Log next to the CSVs/masks
 
 
 // ============== 2. SETUP FUNCTIONS =========================
@@ -114,46 +133,67 @@ function chooseInputDir() {
 }
 
 // Two-step startup dialog.
-//   Step 1: pick mode (filename / dialog) and Threshold mode (manual / automatic)
-//   Step 2 (dialog mode only): edit CELL_LINE/MARKERS/COMBOS/TIMEPOINTS.
 function askModeAndConfig() {
-    // ---- Step 1: mode ----
-    // addRadioButtonGroup(label, items[], rows, columns, defaultItem)
-    // rows × columns defines the visual layout of the buttons.
     Dialog.create("Pipeline mode");
-    Dialog.addMessage("How should the macro know which marker is on which channel\n" + "and how much influence do you want to have?");
+    Dialog.addMessage("How should the macro know which marker is on which channel\n"
+                    + "and how much influence do you want to have?");
     Dialog.addRadioButtonGroup("Mode:",
         newArray("filename", "dialog"), 2, 1, "filename");
-    Dialog.addRadioButtonGroup("Threshold Moudus:",
+    Dialog.addRadioButtonGroup("Threshold mode:",
         newArray("manual", "automatic"), 2, 1, "automatic");
     Dialog.addMessage("What cell line are you analysing?");
-    Dialog.addRadioButtonGroup("Cell Line:",
+    Dialog.addRadioButtonGroup("Cell line:",
         newArray("Huh7", "VeroE6"), 2, 1, "Huh7");
     Dialog.show();
-    MODE = Dialog.getRadioButton();
-    THR_MODE = Dialog.getRadioButton();
+    MODE      = Dialog.getRadioButton();
+    THR_MODE  = Dialog.getRadioButton();
     CELL_LINE = Dialog.getRadioButton();
 
-    // ---- Step 2: config (only in dialog mode) ----
-    // In filename mode the var defaults at the top of the file
-    // are used. CELL_LINE is taken from each filename's token[1].
+    // Apply cell-line-specific defaults BEFORE the optional dialog-mode setup,
+    // so the user could (in theory) override them in the second dialog.
+    applyCellLineDefaults(CELL_LINE);
+
     if (MODE == "dialog") {
         Dialog.create("Pipeline setup (dialog mode)");
         Dialog.addMessage("These values define CSV files and the per-image dialog options.\n"
                         + "Lists are comma-separated. Whitespace is trimmed.");
-        Dialog.addString("Markers:",      arrToStr(MARKERS),       40);
-        Dialog.addString("Combos:",       arrToStr(ANALYSE_COMBI), 40);
-        Dialog.addString("Timepoints:",   arrToStr(TIMEPOINTS),    20);
+        Dialog.addString("Markers:",    arrToStr(MARKERS),       40);
+        Dialog.addString("Combos:",     arrToStr(ANALYSE_COMBI), 40);
+        Dialog.addString("Timepoints:", arrToStr(TIMEPOINTS),    20);
         Dialog.show();
-
-        // get* calls MUST be in the same order as add* calls.
         MARKERS       = parseCsvString(Dialog.getString());
         ANALYSE_COMBI = parseCsvString(Dialog.getString());
         TIMEPOINTS    = parseCsvString(Dialog.getString());
-    } 
+    }
 }
 
-// ISO-ish timestamp without separators.
+// Cell-line-specific mask parameters. Called after CELL_LINE is known.
+// Add new cell lines as additional `else if` branches.
+function applyCellLineDefaults(cellLine) {
+    if (cellLine == "VeroE6") {
+        // Vero cells are ~4x smaller than Huh7 in our images → dim signal
+        // periphery is missed by conservative thresholds. Compensate with:
+        //  - more permissive threshold factor (0.3 vs 0.5)
+        //  - stronger smoothing (1.5 µm vs 1 µm)
+        //  - smaller min particle size (100 vs 200)
+        CELL_THR_METHOD   = "Li";
+        CELL_THR_FACTOR   = 0.3;
+        BLUR_SIGMA_CELL   = 1.5;
+        MIN_PARTICLE_SIZE = 100;
+    } else {
+        // Default = Huh7
+        CELL_THR_METHOD   = "Li";
+        CELL_THR_FACTOR   = 0.5;
+        BLUR_SIGMA_CELL   = 1;
+        MIN_PARTICLE_SIZE = 200;
+    }
+    print("Cell-line defaults applied for " + cellLine + ":");
+    print("  CELL_THR_METHOD   = " + CELL_THR_METHOD);
+    print("  CELL_THR_FACTOR   = " + CELL_THR_FACTOR);
+    print("  BLUR_SIGMA_CELL   = " + BLUR_SIGMA_CELL);
+    print("  MIN_PARTICLE_SIZE = " + MIN_PARTICLE_SIZE);
+}
+
 function makeRunId() {
     getDateAndTime(y, m, dw, d, h, mn, s, ms);
     return "" + y + IJ.pad(m+1, 2) + IJ.pad(d, 2)
@@ -165,15 +205,13 @@ function buildOutputDir() {
     if (!File.exists(MEASURE_DIR)) File.makeDirectory(MEASURE_DIR);
     MEASURE_DIR_RUN_ID = MEASURE_DIR + RUN_ID + File.separator;
     if (!File.exists(MEASURE_DIR_RUN_ID))
-    	File.makeDirectory(MEASURE_DIR_RUN_ID);
+        File.makeDirectory(MEASURE_DIR_RUN_ID);
     if (SAVE_MASKS && !File.exists(MEASURE_DIR_RUN_ID + "masks"))
-    	File.makeDirectory(MEASURE_DIR_RUN_ID + "masks");
+        File.makeDirectory(MEASURE_DIR_RUN_ID + "masks");
     if (SAVE_QC && !File.exists(MEASURE_DIR_RUN_ID + "qc"))
         File.makeDirectory(MEASURE_DIR_RUN_ID + "qc");
 }
 
-// Create one CSV per (timepoint, combo, marker), header on first
-// creation only. Number of CSVs = len(TIMEPOINTS) × len(COMBOS) × 2.
 function initCsvFiles() {
     for (i = 0; i < ANALYSE_COMBI.length; i++) {
         combo = ANALYSE_COMBI[i];
@@ -189,7 +227,6 @@ function initCsvFiles() {
     }
 }
 
-
 function listMockFiles() {
     files = getFileList(INPUT_DIR);
     out = newArray();
@@ -204,45 +241,27 @@ function listMockFiles() {
 
 
 // ============== 3. PER-IMAGE PIPELINE ======================
-//
-// Per image we need 4 pieces of metadata:
-//   tp        : timepoint (e.g. "12h")
-//   cellLine  : cell line (e.g. "Huh7")
-//   m1        : marker on channel 1
-//   m2        : marker on channel 2
-//
-// Source of these depends on MODE:
-//   filename : parse from tokens; on failure fall back to dialog.
-//   dialog   : ask interactively per image (with filename-parsed
-//              defaults if parsing succeeded).
-// ===========================================================
 
 function processOneImage(fname) {
     open(INPUT_DIR + fname);
     title = getTitle();
     imgName = substring(title, 0, lastIndexOf(title, "."));
 
-    // tryParseFilename returns:
-    //   newArray(tp, cellLine, m1, m2)  on success
-    //   empty array                     on failure
     parsed = tryParseFilename(imgName);
 
     // ---- decide metadata source -----------------------------
     tp = ""; cellLine = ""; m1 = ""; m2 = "";
-
     if (MODE == "filename") {
         if (parsed.length == 0) {
             print("  Parse failed for: " + imgName);
             action = askParseFailureAction(imgName);
             if (action == "skip") { print("  -> skipped"); return; }
-            // else: continue into dialog
             meta = askImageMetadata("(parse failed)", "", "", "", "");
             tp = meta[0]; cellLine = meta[1]; m1 = meta[2]; m2 = meta[3];
         } else {
             tp = parsed[0]; cellLine = parsed[1]; m1 = parsed[2]; m2 = parsed[3];
         }
     } else {
-        // dialog mode: pre-fill from filename if parse worked, else blanks
         defTp = ""; defM1 = ""; defM2 = "";
         if (parsed.length > 0) { defTp = parsed[0]; defM1 = parsed[2]; defM2 = parsed[3]; }
         meta = askImageMetadata(imgName, defTp, CELL_LINE, defM1, defM2);
@@ -272,56 +291,52 @@ function processOneImage(fname) {
 
     // ---- masks --------------------------------------------
     if (THR_MODE == "automatic") {
-	    makeCellMask(cellSrc);
-	    makeNucleusMask("DAPI_channel");
+        makeCellMask(cellSrc);
+        makeNucleusMask("DAPI_channel");
+    } else {
+        makeCellMaskManual(cellSrc);
+        makeNucleusMaskManual("DAPI_channel");
     }
-    
-    if (THR_MODE == "manual") {
-	    makeCellMaskManual(cellSrc);
-	    makeNucleusMaskManual("DAPI_channel");
-    }
-    
     makeCytosolMask();
 
-    // Guard: empty cytosol = nothing to measure
+    // ---- NEW V0.4: artifact + particle cleanup -----------
+    // cleanCytosolMask returns how many pixels were removed by artifact
+    // exclusion (informational, written to CSV for QC tracking).
+    nArtifactsExcluded = cleanCytosolMask(m1, m2);
+
+    // Guard: empty / too-small cytosol = nothing meaningful to measure
     selectWindow("Cytosol_Mask");
     getStatistics(area, meanCyto);
     if (meanCyto == 0) {
-        print("  SKIP: cytosol mask empty after subtraction");
+        print("  SKIP: cytosol mask empty after cleanup");
         return;
     }
 
-    // Make cytosol foreground a re-applicable ROI (no pixel multiplication).
+    // Make cytosol foreground a re-applicable ROI
     roiManager("reset");
     selectWindow("Cytosol_Mask");
     run("Create Selection");
     roiManager("Add");
     cytoRoiId = 0;
     nCyto = getRawStatisticsCount();
+    if (nCyto < 1000) {
+        print("  WARN: cytosol very small after cleanup (" + nCyto + " px) — measurements may be unreliable");
+    }
 
     // ---- measure each marker ------------------------------
-    measureAndWrite(m1, m1 + "_channel", cytoRoiId, nCyto, imgName, cellLine, tp, comboKey);
-    measureAndWrite(m2, m2 + "_channel", cytoRoiId, nCyto, imgName, cellLine, tp, comboKey);
+    measureAndWrite(m1, m1 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, imgName, cellLine, tp, comboKey);
+    measureAndWrite(m2, m2 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, imgName, cellLine, tp, comboKey);
 
     // ---- save artefacts -----------------------------------
     if (SAVE_QC)    saveQcOverlay(imgName, m1);
     if (SAVE_MASKS) saveMasksTif(imgName);
 }
 
-// Try to parse filename. Returns:
-//   newArray(tp, cellLine, m1, m2) on success
-//   newArray()  (length 0)         on failure
-//
-// Failure conditions:
-//   - fewer than 7 tokens
-//   - markers not in the MARKERS list (sanity)
-//   - timepoint not in TIMEPOINTS    (sanity)
 function tryParseFilename(imgName) {
     tokens = split(imgName, "_");
     if (tokens.length < 7) return newArray();
     tp_       = tokens[0];
     cellLine_ = tokens[1];
-    // tokens[2] is "Mock" (ignored, we already filtered for it)
     m1_       = tokens[3];
     m2_       = tokens[4];
     if (!inArray(m1_, MARKERS) || !inArray(m2_, MARKERS)) return newArray();
@@ -329,8 +344,6 @@ function tryParseFilename(imgName) {
     return newArray(tp_, cellLine_, m1_, m2_);
 }
 
-// Per-image dialog. Defaults are pre-filled if known.
-// Returns array [tp, cellLine, m1, m2].
 function askImageMetadata(imgLabel, defTp, defCellLine, defM1, defM2) {
     if (defTp == "" || !inArray(defTp, TIMEPOINTS)) defTp = TIMEPOINTS[0];
     if (defM1 == "" || !inArray(defM1, MARKERS))    defM1 = MARKERS[0];
@@ -357,8 +370,6 @@ function askImageMetadata(imgLabel, defTp, defCellLine, defM1, defM2) {
     return newArray(tp_, cellLine_, m1_, m2_);
 }
 
-// Dialog shown when filename parsing fails in filename mode.
-// Returns "skip" or "dialog".
 function askParseFailureAction(imgName) {
     Dialog.create("Filename parse failed");
     Dialog.addMessage("Cannot parse: " + imgName + "\n\nWhat do you want to do?");
@@ -371,11 +382,13 @@ function askParseFailureAction(imgName) {
 
 // ============== 4. CHANNEL HANDLING ========================
 
+// FIX V0.4: intermediate variable — avoids the IJM
+// "return userFunction(...)" type-inference bug.
 function isValidCombo(comboKey) {
-    return inArray(comboKey, ANALYSE_COMBI);
+    result = inArray(comboKey, ANALYSE_COMBI);
+    return result;
 }
 
-// C1 = marker1, C2 = marker2, C3 = DAPI (fixed by acquisition).
 function splitAndRenameChannels(title, m1, m2) {
     selectWindow(title);
     run("Split Channels");
@@ -384,8 +397,6 @@ function splitAndRenameChannels(title, m1, m2) {
     selectWindow("C3-" + title); rename("DAPI_channel");
 }
 
-// Priority: HA568 > HA488 > NS4B568 > dsRNA488. In Mock HA gives
-// the best cytoplasmic autofluorescence coverage.
 function pickCellMaskSource(m1, m2) {
     priority = newArray("HA568", "HA488", "NS4B568", "dsRNA488");
     for (i = 0; i < priority.length; i++) {
@@ -397,44 +408,37 @@ function pickCellMaskSource(m1, m2) {
 
 
 // ============== 5. MASKS ===================================
-// All masks are 8-bit binary 0/255 (ImageJ native).
-// ===========================================================
 
+// Cell mask with auto-threshold + CELL_THR_FACTOR scaling.
+// The factor lets us be more permissive without changing the method:
+// the method adapts per image, factor sets global strictness.
 function makeCellMask(srcTitle) {
     selectWindow(srcTitle);
     run("Duplicate...", "title=Cell_Mask");
-    // Enhance Contrast only changes the DISPLAY LUT, NOT pixel
-    // values. setAutoThreshold reads raw data, so this is
-    // cosmetic — but it does help when you're watching the run.
     run("Enhance Contrast", "saturated=0.35");
-    // "scaled" = sigma is in microns (physical units from image
-    // metadata). On a 2850×2850 image at 100.57 µm, 1 µm ≈ 28 px,
-    // i.e. heavy smoothing — exactly what we need to bridge the
-    // gaps between dim cytoplasm and bright spots.
     run("Gaussian Blur...", "sigma=" + BLUR_SIGMA_CELL + " scaled");
+
     setAutoThreshold(CELL_THR_METHOD + " dark");
+    getThreshold(lo, hi);
+    loNew = lo * CELL_THR_FACTOR;
+    if (loNew < 0) loNew = 0;
+    setThreshold(loNew, hi);
+    print("  cell thr (" + CELL_THR_METHOD + "): auto=" + lo
+        + ", scaled by " + CELL_THR_FACTOR + " -> " + loNew);
+
     run("Convert to Mask");
-    // Internal holes (dim spots inside cells) get filled.
     run("Fill Holes");
 }
 
 function makeCellMaskManual(srcTitle) {
     selectWindow(srcTitle);
     run("Duplicate...", "title=Cell_Mask");
-    // Enhance Contrast only changes the DISPLAY LUT, NOT pixel
-    // values. setAutoThreshold reads raw data, so this is
-    // cosmetic — but it does help when you're watching the run.
     run("Enhance Contrast", "saturated=0.35");
-    // "scaled" = sigma is in microns (physical units from image
-    // metadata). On a 2850×2850 image at 100.57 µm, 1 µm ≈ 28 px,
-    // i.e. heavy smoothing — exactly what we need to bridge the
-    // gaps between dim cytoplasm and bright spots.
     run("Gaussian Blur...", "sigma=" + BLUR_SIGMA_CELL + " scaled");
     run("Threshold...");
     setAutoThreshold(CELL_THR_METHOD + " dark");
     waitForUser("Check and adjust the threshold if necessary, then click OK.");
     run("Convert to Mask");
-    // Internal holes (dim spots inside cells) get filled.
     run("Fill Holes");
     run("Close");
 }
@@ -446,12 +450,6 @@ function makeNucleusMask(dapiTitle) {
     run("Gaussian Blur...", "sigma=" + BLUR_SIGMA_NUC + " scaled");
     setAutoThreshold(NUC_THR_METHOD + " dark");
     run("Convert to Mask");
-
-    // Morphological closing (Dilate × N, then Erode × N) before
-    // Fill Holes: closes thin gaps in the nuclear boundary so
-    // Fill Holes can actually enclose the holes. Without this,
-    // small "bites" stay open because they reach the image edge
-    // through a 1-pixel gap.
     if (NUC_CLOSE_ITER > 0) {
         run("Options...", "iterations=" + NUC_CLOSE_ITER + " count=1 black do=Nothing");
         run("Dilate");
@@ -472,12 +470,6 @@ function makeNucleusMaskManual(dapiTitle) {
     waitForUser("Check and adjust the threshold if necessary, then click OK.");
     run("Convert to Mask");
     run("Close");
-
-    // Morphological closing (Dilate × N, then Erode × N) before
-    // Fill Holes: closes thin gaps in the nuclear boundary so
-    // Fill Holes can actually enclose the holes. Without this,
-    // small "bites" stay open because they reach the image edge
-    // through a 1-pixel gap.
     if (NUC_CLOSE_ITER > 0) {
         run("Options...", "iterations=" + NUC_CLOSE_ITER + " count=1 black do=Nothing");
         run("Dilate");
@@ -488,8 +480,8 @@ function makeNucleusMaskManual(dapiTitle) {
     }
 }
 
-// Cytosol = Cell − Nucleus. In 8-bit subtraction is clamped at 0,
-// so this gives a clean binary: cell-not-nucleus = 255, else 0.
+// Cytosol = Cell − Nucleus. 8-bit subtraction clamps at 0, giving a clean
+// binary: cell-not-nucleus = 255, else 0.
 function makeCytosolMask() {
     imageCalculator("Subtract create", "Cell_Mask", "Nucleus_Mask");
     rename("Cytosol_Mask");
@@ -498,16 +490,95 @@ function makeCytosolMask() {
 }
 
 
-// ============== 6. MEASUREMENT (TOP-X% via histogram) ======
-// IMPORTANT — IJM quirk:
-//   getHistogram(values, counts, 65536, 0, 65535) on a 16-bit
-//   image does NOT populate `values[]` (it stays as scalar 0).
-//   This is a memory optimisation since bin index == pixel
-//   value for this setup. We therefore use `i` directly as
-//   the value in all bin loops, and ignore `values`.
+// ============== 5b. ARTIFACT + PARTICLE CLEANUP (V0.4) =====
+//
+// Strategy:
+//   1) Build per-channel artifact masks (pixel > ARTIFACT_UPPER_BOUND).
+//   2) OR them into one combined Artifact_Mask. Pixels too bright in
+//      EITHER channel are excluded — important for downstream coloc,
+//      where an artifact in one channel must not be measured against
+//      the other.
+//   3) Subtract Artifact_Mask from Cytosol_Mask.
+//   4) Run Analyze Particles to drop disconnected regions smaller
+//      than MIN_PARTICLE_SIZE — handles tiny bright dots on the
+//      coverslip that survived (1).
+//
+// Why both? Different artifact populations:
+//   - Inside cells: bright dust/debris → caught by (1).
+//   - Outside cells: small bright fragments that the cell threshold
+//     captured by accident → caught by (4).
+// They complement each other; we don't have to catch 100 % to fix
+// the Mock median (we only need to drop the worst outliers).
 // ===========================================================
 
-function measureAndWrite(marker, chTitle, cytoRoiId, nCyto,
+function makeArtifactMaskFor(srcTitle, maskName) {
+    selectWindow(srcTitle);
+    run("Duplicate...", "title=" + maskName);
+    setThreshold(ARTIFACT_UPPER_BOUND, 65535);
+    run("Convert to Mask");
+    if (ARTIFACT_DILATE_ITER > 0) {
+        run("Options...", "iterations=" + ARTIFACT_DILATE_ITER + " count=1 black do=Nothing");
+        run("Dilate");
+    }
+}
+
+function buildCombinedArtifactMask(m1, m2) {
+    makeArtifactMaskFor(m1 + "_channel", "Artifact_M1");
+    makeArtifactMaskFor(m2 + "_channel", "Artifact_M2");
+    imageCalculator("OR create", "Artifact_M1", "Artifact_M2");
+    rename("Artifact_Mask");
+    if (isOpen("Artifact_M1")) { selectWindow("Artifact_M1"); close(); }
+    if (isOpen("Artifact_M2")) { selectWindow("Artifact_M2"); close(); }
+}
+
+// Apply artifact exclusion + particle-size filter to Cytosol_Mask.
+// Returns the number of pixels removed by artifact exclusion (for CSV log).
+function cleanCytosolMask(m1, m2) {
+    // Count cytosol pixels BEFORE cleanup
+    nBefore = countMaskForeground("Cytosol_Mask");
+
+    // (1+2+3) Artifact subtraction
+    buildCombinedArtifactMask(m1, m2);
+    imageCalculator("Subtract create", "Cytosol_Mask", "Artifact_Mask");
+    rename("Cytosol_Clean");
+    if (isOpen("Cytosol_Mask")) { selectWindow("Cytosol_Mask"); close(); }
+    selectWindow("Cytosol_Clean"); rename("Cytosol_Mask");
+    setThreshold(1, 255);
+    run("Convert to Mask");
+
+    nAfterArtifact = countMaskForeground("Cytosol_Mask");
+    nArtifactsExcluded = nBefore - nAfterArtifact;
+    print("  artifact excl: " + nArtifactsExcluded + " px removed (threshold > " + ARTIFACT_UPPER_BOUND + ")");
+
+    // (4) Particle-size filter
+    selectWindow("Cytosol_Mask");
+    run("Analyze Particles...", "size=" + MIN_PARTICLE_SIZE + "-Infinity show=Masks");
+    // Output window: "Mask of Cytosol_Mask"
+    if (isOpen("Cytosol_Mask")) { selectWindow("Cytosol_Mask"); close(); }
+    selectWindow("Mask of Cytosol_Mask"); rename("Cytosol_Mask");
+    nAfterParticle = countMaskForeground("Cytosol_Mask");
+    print("  particle filter (>= " + MIN_PARTICLE_SIZE + " px): " + (nAfterArtifact - nAfterParticle) + " px removed");
+
+    return nArtifactsExcluded;
+}
+
+// Count foreground pixels (value == 255) of a binary mask via its histogram.
+// IJM quirk: getHistogram(values, counts, nBins, histMin, histMax) ONLY works
+// for 16- or 32-bit images. On 8-bit images (our binary masks) you MUST call
+// the 3-arg form — IJM then uses the fixed 0..255 range automatically.
+function countMaskForeground(maskTitle) {
+    selectWindow(maskTitle);
+    getHistogram(values, counts, 256);   // no min/max for 8-bit!
+    return counts[255];
+}
+
+
+// ============== 6. MEASUREMENT (TOP-X% via histogram) ======
+// IJM quirk: getHistogram with nBins=65536, range 0..65535 does NOT
+// populate values[]. We use bin index `i` directly as the pixel value.
+// ===========================================================
+
+function measureAndWrite(marker, chTitle, cytoRoiId, nCyto, nArtifactsExcluded,
                          imgName, cellLine, tp, comboKey) {
     if (!isOpen(chTitle)) {
         print("  WARN: channel window missing: " + chTitle);
@@ -517,7 +588,7 @@ function measureAndWrite(marker, chTitle, cytoRoiId, nCyto,
     roiManager("Select", cytoRoiId);
 
     nBins = 65536;
-    getHistogram(values, counts, nBins, 0, 65535);  // `values` unreliable!
+    getHistogram(values, counts, nBins, 0, 65535);
 
     nTotal = 0;
     for (i = 0; i < nBins; i++) nTotal += counts[i];
@@ -527,15 +598,12 @@ function measureAndWrite(marker, chTitle, cytoRoiId, nCyto,
     }
 
     stats = computeTopStats(counts, nBins, nTotal, TOP_PCT);
-    // stats = [thr, nTop, meanTop, medianTop, stdTop, p95, p99, p99_25, p99_5, p99_9, p99_95, p99_99, p99_995, p99_999]
-
     csvPath = MEASURE_DIR_RUN_ID + CELL_LINE + "_mock_" + tp + "_" + marker + "_in_" + comboKey + ".csv";
-    appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, marker, stats, nCyto);
+    appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, marker, stats, nCyto, nArtifactsExcluded);
 }
 
-// Pure number-crunching. No selection, no UI. Uses bin index = value.
 function computeTopStats(counts, nBins, nTotal, topPct) {
-    // (1) Find threshold V*: lowest pixel value still in the top X%.
+    // (1) Find threshold V*
     nTopTarget = floor(nTotal * topPct / 100.0);
     if (nTopTarget < 1) nTopTarget = 1;
     acc = 0;
@@ -547,7 +615,7 @@ function computeTopStats(counts, nBins, nTotal, topPct) {
         }
     }
 
-    // (2) Mean and std over the top pool (value >= V*).
+    // (2) Mean and std over the top pool
     nTop = 0; sumV = 0; sumV2 = 0;
     for (i = threshold_value; i < nBins; i++) {
         if (counts[i] > 0) {
@@ -560,7 +628,7 @@ function computeTopStats(counts, nBins, nTotal, topPct) {
     var_top  = (sumV2 / nTop) - mean_top * mean_top;
     std_top  = sqrt(maxOf(var_top, 0));
 
-    // (3) Median of the top pool: cumulative count to nTop/2.
+    // (3) Median of the top pool
     half = nTop / 2.0;
     a = 0; median_top = threshold_value;
     for (i = threshold_value; i < nBins; i++) {
@@ -570,16 +638,16 @@ function computeTopStats(counts, nBins, nTotal, topPct) {
         }
     }
 
-    // (4) Whole-cytosol percentiles (sanity / outlier detection).
-    p95    = pctIndex(counts, nBins, nTotal, 95);
-    p99    = pctIndex(counts, nBins, nTotal, 99);
-    p99_25 = pctIndex(counts, nBins, nTotal, 99.25);
-    p99_5  = pctIndex(counts, nBins, nTotal, 99.5);
-    p99_9  = pctIndex(counts, nBins, nTotal, 99.9);
+    // (4) Whole-cytosol percentiles for sanity / outlier detection
+    p95     = pctIndex(counts, nBins, nTotal, 95);
+    p99     = pctIndex(counts, nBins, nTotal, 99);
+    p99_25  = pctIndex(counts, nBins, nTotal, 99.25);
+    p99_5   = pctIndex(counts, nBins, nTotal, 99.5);
+    p99_9   = pctIndex(counts, nBins, nTotal, 99.9);
     p99_95  = pctIndex(counts, nBins, nTotal, 99.95);
     p99_99  = pctIndex(counts, nBins, nTotal, 99.99);
-    p99_995  = pctIndex(counts, nBins, nTotal, 99.995);
-    p99_999  = pctIndex(counts, nBins, nTotal, 99.999);
+    p99_995 = pctIndex(counts, nBins, nTotal, 99.995);
+    p99_999 = pctIndex(counts, nBins, nTotal, 99.999);
 
     return newArray(threshold_value, nTop, mean_top, median_top, std_top,
                     p95, p99, p99_25, p99_5, p99_9, p99_95, p99_99, p99_995, p99_999);
@@ -604,15 +672,17 @@ function getRawStatisticsCount() {
 // ============== 7. CSV / OUTPUT ============================
 
 function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
-                      stats, nCyto) {
+                      stats, nCyto, nArtifactsExcluded) {
     line = imgName + "," + cellLine + "," + tp + "," + comboKey + "," + channel
         + "," + STAT_METHOD + "," + TOP_PCT
         + "," + MODE + "," + THR_MODE
-        + "," + stats[0] + "," + stats[1] + "," + nCyto
+        + "," + stats[0] + "," + stats[1] + "," + nCyto + "," + nArtifactsExcluded
         + "," + stats[2] + "," + stats[3] + "," + stats[4]
-        + "," + stats[5] + "," + stats[6] + "," + stats[7] + "," + stats[8] + "," + stats[9] + "," + stats[10] + "," + stats[11] + "," + stats[12] + "," + stats[13]
-        + "," + CELL_THR_METHOD + "," + NUC_THR_METHOD
+        + "," + stats[5] + "," + stats[6] + "," + stats[7] + "," + stats[8] + "," + stats[9]
+        + "," + stats[10] + "," + stats[11] + "," + stats[12] + "," + stats[13]
+        + "," + CELL_THR_METHOD + "," + NUC_THR_METHOD + "," + CELL_THR_FACTOR
         + "," + BLUR_SIGMA_CELL + "," + BLUR_SIGMA_NUC
+        + "," + ARTIFACT_UPPER_BOUND + "," + MIN_PARTICLE_SIZE
         + "," + MACRO_VERSION + "," + RUN_ID;
     File.append(line, csvPath);
 }
@@ -620,13 +690,14 @@ function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
 function saveMasksTif(imgName) {
     masksDir = MEASURE_DIR_RUN_ID + "masks" + File.separator;
     filename = RUN_ID + "_" + imgName;
-    selectWindow("Cell_Mask");    saveAs("Tiff", masksDir + filename + "_cell.tif");
-    selectWindow("Nucleus_Mask"); saveAs("Tiff", masksDir + filename + "_nuc.tif");
-    selectWindow("Cytosol_Mask"); saveAs("Tiff", masksDir + filename + "_cyto.tif");
+    if (isOpen("Cell_Mask"))     { selectWindow("Cell_Mask");     saveAs("Tiff", masksDir + filename + "_cell.tif"); }
+    if (isOpen("Nucleus_Mask"))  { selectWindow("Nucleus_Mask");  saveAs("Tiff", masksDir + filename + "_nuc.tif"); }
+    if (isOpen("Cytosol_Mask"))  { selectWindow("Cytosol_Mask");  saveAs("Tiff", masksDir + filename + "_cyto.tif"); }
+    if (isOpen("Artifact_Mask")) { selectWindow("Artifact_Mask"); saveAs("Tiff", masksDir + filename + "_artifact.tif"); }
 }
 
 function saveQcOverlay(imgName, m1) {
-    qcDir = MEASURE_DIR_RUN_ID  + "qc" + File.separator;
+    qcDir = MEASURE_DIR_RUN_ID + "qc" + File.separator;
     filename = RUN_ID + "_" + imgName + "_qc.png";
     src = m1 + "_channel";
     if (!isOpen(src)) return;
@@ -641,7 +712,7 @@ function saveQcOverlay(imgName, m1) {
     run("Add Selection...");
     run("Flatten");
     saveAs("PNG", qcDir + filename);
-    close();   // close the flattened (now active after saveAs)
+    close();
     if (isOpen("qc_tmp")) { selectWindow("qc_tmp"); close(); }
 }
 
@@ -655,7 +726,6 @@ function cleanupBetweenImages() {
     if (selectionType() != -1) run("Select None");
 }
 
-// "a, b ,c" -> ["a","b","c"]  (trimmed)
 function parseCsvString(s) {
     raw = split(s, ",");
     out = newArray(raw.length);
@@ -663,7 +733,6 @@ function parseCsvString(s) {
     return out;
 }
 
-// ["a","b","c"] -> "a,b,c"  (for logging / dialog defaults)
 function arrToStr(a) {
     s = "";
     for (i = 0; i < a.length; i++) {
