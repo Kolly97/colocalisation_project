@@ -1,4 +1,4 @@
-# Initial Mock Top-1% Pipeline
+# Mock Background Pipeline
 
 ---
 
@@ -99,6 +99,8 @@ This version automatically processes all Mock .tif images in a selected input fo
 - Removed the old strict filename-only parsing logic from ***processOneImage()***.
 - Removed the old ***pct()*** helper function and replaced with new ***pctIndex()*** function.
 
+---
+
 ## v0.3.0
 
 **Major changes** 
@@ -126,4 +128,44 @@ This version automatically processes all Mock .tif images in a selected input fo
 
 ### Removed
 - No major functionality removed in this version.
-- 
+
+---
+
+## v0.4.0
+
+**Major Features**
+
+- Artifact Exclusion  via Threshold to exclude signal over **ARTIFACT_UPPER_BOUND**
+- Cytosol Mask Cleanup by ecxcluding particles <= **MIN_PARTICLE_SIZE**
+
+### Added
+- Added artifact exclusion using an upper-bound intensity threshold.
+- Added **ARTIFACT_UPPER_BOUND** to remove pixels with very high intensity in either marker channel from the cytosol mask.
+- Added combined artifact-mask generation via ***buildCombinedArtifactMask()***
+- Added per-channel artifact-mask creation via ***makeArtifactMaskFor()***
+- Added particle-size filtering for the cytosol mask via ***cleanCytosolMask()***
+- Added **MIN_PARTICLE_SIZE** to remove small disconnected cytosol fragments.
+- Added cell-line-specific defaults via ***applyCellLineDefaults()***
+- Added **CELL_THR_FACTOR** to scale the automatic cell-threshold lower bound.
+- Added artifact mask saving for visual QC.
+- Added CSV columns:
+  - cell_thr_factor
+  - artifact_upper_bound
+  - min_particle_size
+  - n_artifacts_excluded
+
+### Changed
+- Updated cytosol-mask generation to exclude high-intensity artifacts before measurement.
+- Updated cell-mask thresholding to support cell-line-specific threshold scaling.
+- Updated QC output to include artifact masks.
+- Improved support for smaller VeroE6 cells through more permissive default settings.
+
+### Fixed
+- Fixed ***isValidCombo()*** by using an intermediate variable to avoid an IJM macro-language issue.
+- Fixed **CELL_LINE** declaration as a single string instead of an array.
+
+### Removed
+- No major functionality removed in this version.
+
+---
+
