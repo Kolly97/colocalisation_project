@@ -34,14 +34,67 @@ This version automatically processes all Mock .tif images in a selected input fo
 - Optional saving of binary masks and QC overlays
 - Reproducible folder structure for results, masks, and QC images
 
+---
+
 ## v0.2.0
 
+**Biggest changes**
 
+- Dialog Mode
+- Filename Fallback
+- Histogram Fix
 
-### New function
+### Added
 
-- 
+- **Added startup mode selector with two modes:**
 
-### Erased functions
+  - **filename:** automated metadata parsing from the image filename.
 
-- 
+  - **dialog:** manual metadata entry for more flexible analysis
+
+- **Added startup configuration dialog if other markers, combi, cell types or timepoints are used:**
+
+  - cell line
+
+  - available markers
+
+  - marker combinations
+
+  - timepoints
+
+- **Added per-image metadata dialog to manually define:**
+
+  - timepoint
+
+  - cell line
+
+  - marker on C1
+
+  - marker on C2
+
+- Added fallback dialog when filename parsing fails in filename mode.
+- Added ***tryParseFilename()*** to separate filename parsing from the main image-processing workflow.
+- Added ***askImageMetadata()*** for per-image manual metadata input.
+- Added ***askParseFailureAction()*** to choose whether to skip an image or enter metadata manually after parsing failure.
+- Added utility functions:
+  - ***parseCsvString()***
+  - ***arrToStr()***
+  - ***inArray()***
+- Added **NUC_CLOSE_ITER** parameter for configurable morphological closing of the nucleus mask.
+
+### Changed
+- Updated ***processOneImage()*** to support both filename-based and dialog-based metadata handling.
+- Improved cell mask generation by adding contrast enhancement and scaled Gaussian blur.
+- Improved nucleus mask generation by adding contrast enhancement, scaled Gaussian blur, and morphological closing before hole filling.
+- Updated top-1% histogram analysis to use the histogram bin index directly as the pixel intensity value.
+- Replaced the old percentile calculation based on values[] with index-based percentile calculation.
+- Updated logging to report selected mode, marker list, marker combinations, and timepoints at startup.
+
+### Fixed
+- Fixed unreliable intensity values from ***getHistogram()*** for full-range 16-bit histograms.
+- Fixed top-1% statistics and percentile calculations by avoiding dependence on the values[] array.
+- Improved robustness when image filenames do not match the expected naming scheme.
+
+### Removed
+- Removed the old strict filename-only parsing logic from ***processOneImage()***.
+- Removed the old ***pct()*** helper function and replaced with new ***pctIndex()*** function.
