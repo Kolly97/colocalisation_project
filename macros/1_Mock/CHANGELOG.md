@@ -38,7 +38,7 @@ This version automatically processes all Mock .tif images in a selected input fo
 
 ## v0.2.0
 
-**Biggest changes**
+**Major changes**
 
 - Dialog Mode
 - Filename Fallback
@@ -98,3 +98,32 @@ This version automatically processes all Mock .tif images in a selected input fo
 ### Removed
 - Removed the old strict filename-only parsing logic from ***processOneImage()***.
 - Removed the old ***pct()*** helper function and replaced with new ***pctIndex()*** function.
+
+## v0.3.0
+
+**Major changes** 
+
+- Manual Threshold Mode
+- Run-Specific CSV Export (with RUN_ID)
+
+### Added
+- Added threshold mode selector at startup:
+  - automatic: fully automatic cell and nucleus thresholding.
+  - manual: user can inspect and adjust cell and nucleus thresholds before mask conversion.
+- Added ***makeCellMaskManual() ***for interactive cell-mask thresholding.
+- Added ***makeNucleusMaskManual()*** for interactive nucleus-mask thresholding.
+- Added **THR_MODE** to track whether automatic or manual thresholding was used.
+- Added threshold_mode column to the CSV output.
+- Added run-specific CSV output paths using **MEASURE_DIR_RUN_ID**
+
+### Changed
+- Updated ***processOneImage()*** to choose between automatic and manual mask generation depending on **THR_MODE**
+- Updated CSV filenames to include the selected cell line.
+- Updated startup logging to report the selected threshold mode.
+
+### Fixed
+- Improved manual QC workflow by allowing threshold adjustment before converting masks.
+
+### Removed
+- No major functionality removed in this version.
+- 
