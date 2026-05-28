@@ -202,3 +202,35 @@ This version automatically processes all Mock .tif images in a selected input fo
 
 ### Removed
 - No major functionality removed in this version.
+
+---
+## v0.5.0 
+**Major futures**
+- Composite JPG QC  
+- Binary Mask Stability Fix (invert cell mask)
+- Fixed mask bug (mask creation stopped after first image)
+
+### Added
+- Added **SAVE_COMPOSITE_JPG** option.
+- Added ***saveCompositeJpg()** to export a merged RGB composite QC image.
+- Composite JPGs include:
+  - marker 1 in red
+  - marker 2 in green
+  - DAPI in blue
+  - cytosol ROI outline
+- Added stronger QC support to visually inspect whether artifacts, nuclei, and cytosol masks are handled correctly.
+
+### Changed
+- Composite JPG export is now run before mask saving to preserve access to the original channel windows.
+- VeroE6 defaults updated:
+  - **CELL_THR_FACTOR set to 0.5**
+  - **ARTIFACT_UPPER_BOUND** set to 1000
+- Huh7 defaults now explicitly set **ARTIFACT_UPPER_BOUND** to 2000.
+
+### Fixed
+- Added repeated ***setOption("BlackBackground", true)** calls to prevent Fiji from silently inverting binary masks.
+- Improved stability after Merge Channels / Stack to RGB operations.
+- Composite JPG generation now duplicates source channels before merging, preventing LUT/display changes from affecting original channel windows.
+
+### Removed
+- No major functionality removed in this version.
