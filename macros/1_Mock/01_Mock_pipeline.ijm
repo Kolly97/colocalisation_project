@@ -1,32 +1,32 @@
 // ==========================================================
-// Mock Top-X% Pipeline  --  V0.4
-// Author 	: Kolja Hildenbrand
-// Date   	: 2026-05-27
+// Mock Top-X% Pipeline  --  V0.4.1.
+// Author : Kolja Hildenbrand
+// Date   : 2026-05-27
 // Status	: OLD
+//
+// Changes vs V0.4:
 // ==========================================================
-// Changes vs V0.3:
-//  - NEW:   Artifact exclusion via upper-bound thresholding.
-//           Pixels with intensity > ARTIFACT_UPPER_BOUND in
-//           EITHER marker channel are removed from the cytosol
-//           mask — handles dust / coverslip contamination that
-//           would otherwise dominate the Top-X% statistic.
-//  - NEW:   Particle-size filter on cytosol mask. Disconnected
-//           regions smaller than MIN_PARTICLE_SIZE (px) are
-//           dropped — handles small bright fragments on the
-//           coverslip outside any real cell.
-//  - NEW:   Cell-line-specific defaults via applyCellLineDefaults.
-//           VeroE6 cells are ~4× smaller than Huh7 → more
-//           permissive threshold + smaller min particle size.
-//  - NEW:   CELL_THR_FACTOR multiplier — scales the auto-threshold
-//           lower bound for a more permissive cell mask.
-//  - NEW:   Artifact mask saved alongside cell/nucleus/cytosol
-//           masks for visual QC.
-//  - NEW:   CSV columns added: cell_thr_factor, artifact_upper_bound,
-//           min_particle_size, n_artifacts_excluded.
-//  - FIX:   isValidCombo uses intermediate variable (IJM quirk).
-//  - FIX:   CELL_LINE declared as single string, not array.
+//  - NEW:   Added artifact-mask dilation via ARTIFACT_DILATE_ITER.
+//           Artifact regions are now expanded before exclusion.
+//
+//  - CHANGE: Stronger artifact exclusion defaults.
+//            ARTIFACT_UPPER_BOUND lowered from 4000 to 2000,
+//            ARTIFACT_DILATE_ITER increased from 2 to 20.
+//
+//  - NEW:   Added extra high-percentile intensity outputs:
+//           p99_9995 and p99_9999.
+//
+//  - NEW:   Added saveLogToFile() to save the full FIJI Log
+//           after each run for reproducibility and debugging.
+//
+//  - CHANGE: Updated VeroE6 default settings:
+//            CELL_THR_FACTOR 0.3 -> 0.4,
+//            BLUR_SIGMA_CELL 1.5 -> 1.
+//
+//  - CHANGE: CSV output updated with additional percentile columns.
+//
+//  - REMOVE: No major functionality removed.
 // ==========================================================
-
 
 // ============== 1. CONFIG (globals via `var`) ==============
 
@@ -63,8 +63,8 @@ var CELL_THR_FACTOR  = 0.5;
 // then ORed together so contamination in either channel is excluded from
 // the cytosol mask. Tune per dataset — real biology in Mock samples
 // typically peaks well below this.
-var ARTIFACT_UPPER_BOUND = 4000;
-var ARTIFACT_DILATE_ITER = 2;       // expand artifact slightly to catch the rim
+var ARTIFACT_UPPER_BOUND = 2000;
+var ARTIFACT_DILATE_ITER = 20;       // expand artifact slightly to catch the rim
 
 // PARTICLE-SIZE FILTER (NEW V0.4)
 // Cytosol regions smaller than this (in PIXELS) are dropped after the
@@ -81,7 +81,7 @@ var SAVE_QC    = true;
 var SAVE_MASKS = true;
 
 // Reproducibility
-var MACRO_VERSION = "0.4.0";
+var MACRO_VERSION = "0.4.1";
 
 // CSV header — columns added in V0.4 marked with /* V0.4 */
 var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
@@ -89,7 +89,7 @@ var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
                + "macro_mode,threshold_mode,"
                + "threshold_value,n_top_pixels,n_cyto_pixels,n_artifacts_excluded," /* V0.4 */
                + "mean_top,median_top,std_top,"
-               + "p95,p99,p99_25,p99_5,p99_9,p99_95,p99_99,p99_995,p99_999,"
+               + "p95,p99,p99_25,p99_5,p99_9,p99_95,p99_99,p99_995,p99_999,p99_9995,p99_9999,"
                + "cell_thr_method,nuc_thr_method,cell_thr_factor," /* V0.4 */
                + "blur_sigma_cell,blur_sigma_nuc,"
                + "artifact_upper_bound,min_particle_size," /* V0.4 */
@@ -177,8 +177,8 @@ function applyCellLineDefaults(cellLine) {
         //  - stronger smoothing (1.5 µm vs 1 µm)
         //  - smaller min particle size (100 vs 200)
         CELL_THR_METHOD   = "Li";
-        CELL_THR_FACTOR   = 0.3;
-        BLUR_SIGMA_CELL   = 1.5;
+        CELL_THR_FACTOR   = 0.4;
+        BLUR_SIGMA_CELL   = 1;
         MIN_PARTICLE_SIZE = 100;
     } else {
         // Default = Huh7
@@ -192,6 +192,8 @@ function applyCellLineDefaults(cellLine) {
     print("  CELL_THR_FACTOR   = " + CELL_THR_FACTOR);
     print("  BLUR_SIGMA_CELL   = " + BLUR_SIGMA_CELL);
     print("  MIN_PARTICLE_SIZE = " + MIN_PARTICLE_SIZE);
+    print("  ARTIFACT_UPPER_BOUND = " + ARTIFACT_UPPER_BOUND);
+    print("  ARTIFACT_DILATE_ITER = " + ARTIFACT_DILATE_ITER);
 }
 
 function makeRunId() {
@@ -306,6 +308,7 @@ function processOneImage(fname) {
 
     // Guard: empty / too-small cytosol = nothing meaningful to measure
     selectWindow("Cytosol_Mask");
+    run("Invert");
     getStatistics(area, meanCyto);
     if (meanCyto == 0) {
         print("  SKIP: cytosol mask empty after cleanup");
@@ -648,9 +651,11 @@ function computeTopStats(counts, nBins, nTotal, topPct) {
     p99_99  = pctIndex(counts, nBins, nTotal, 99.99);
     p99_995 = pctIndex(counts, nBins, nTotal, 99.995);
     p99_999 = pctIndex(counts, nBins, nTotal, 99.999);
+    p99_9995 = pctIndex(counts, nBins, nTotal, 99.9995);
+    p99_9999 = pctIndex(counts, nBins, nTotal, 99.9999);
 
     return newArray(threshold_value, nTop, mean_top, median_top, std_top,
-                    p95, p99, p99_25, p99_5, p99_9, p99_95, p99_99, p99_995, p99_999);
+                    p95, p99, p99_25, p99_5, p99_9, p99_95, p99_99, p99_995, p99_999, p99_9995, p99_9999);
 }
 
 function pctIndex(counts, nBins, nTotal, p) {
@@ -679,7 +684,7 @@ function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
         + "," + stats[0] + "," + stats[1] + "," + nCyto + "," + nArtifactsExcluded
         + "," + stats[2] + "," + stats[3] + "," + stats[4]
         + "," + stats[5] + "," + stats[6] + "," + stats[7] + "," + stats[8] + "," + stats[9]
-        + "," + stats[10] + "," + stats[11] + "," + stats[12] + "," + stats[13]
+        + "," + stats[10] + "," + stats[11] + "," + stats[12] + "," + stats[13] + "," + stats[14] + "," + stats[15]
         + "," + CELL_THR_METHOD + "," + NUC_THR_METHOD + "," + CELL_THR_FACTOR
         + "," + BLUR_SIGMA_CELL + "," + BLUR_SIGMA_NUC
         + "," + ARTIFACT_UPPER_BOUND + "," + MIN_PARTICLE_SIZE
@@ -718,6 +723,18 @@ function saveQcOverlay(imgName, m1) {
 
 
 // ============== 8. CLEANUP & UTILS =========================
+
+// Save the IJ Log window to a text file alongside the CSVs.
+// Call this LAST in MAIN so the file captures every print() up to here,
+// including per-image threshold values, artifact counts, particle filter
+// counts, and any warnings. Essential for reproducibility and debugging.
+function saveLogToFile() {
+    if (!isOpen("Log")) return;
+    logPath = MEASURE_DIR_RUN_ID + "macro_log_" + RUN_ID + ".txt";
+    selectWindow("Log");
+    saveAs("Text", logPath);
+    print("Saved log: " + logPath);
+}
 
 function cleanupBetweenImages() {
     while (nImages > 0) { selectImage(nImages); close(); }
