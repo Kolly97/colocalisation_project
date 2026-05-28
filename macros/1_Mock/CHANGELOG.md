@@ -169,3 +169,36 @@ This version automatically processes all Mock .tif images in a selected input fo
 
 ---
 
+
+
+## v0.4.1.
+
+** Major changes**
+- Stronger Artifact Handling 
+- Extended Percentiles
+-  Fiji Log Export to see what happened
+
+### Added
+- Added **ARTIFACT_DILATE_ITER** to expand artifact masks around very bright artifact pixels.
+- Added stronger artifact exclusion defaults:
+  - **ARTIFACT_UPPER_BOUND** lowered from 4000 to 2000.
+  - **ARTIFACT_DILATE_ITER** increased from 2 to 20.
+- Added additional high-percentile output columns:
+  - p99_9995
+  - p99_9999
+- Added ***saveLogToFile()*** to export the full FIJI Log window as a text file after the run.
+- Added artifact settings to startup logging.
+
+### Changed
+- Updated VeroE6 defaults:
+  - **CELL_THR_FACTOR** changed from 0.3 to 0.4.
+  - **BLUR_SIGMA_CELL** changed from 1.5 to 1.
+- Updated CSV header and row export to include the new high-percentile values.
+- Updated macro version from 0.4.0 to 0.4.1.
+
+### Fixed
+- Improved reproducibility by saving the full macro log alongside the CSV results.
+- Improved tracking of artifact exclusion settings in the log output.
+
+### Removed
+- No major functionality removed in this version.
