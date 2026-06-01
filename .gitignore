@@ -8,6 +8,8 @@
 *.xlsm
 # images 
 images/
+# checkpoint jupyter notebook
+*-checkpoint.ipynb
 # Pipeline outputs
 measure_mock/
 qc/
