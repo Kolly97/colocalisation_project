@@ -1,10 +1,17 @@
 // ==========================================================
-// Mock Top-X% Pipeline  --  V0.5
+// Mock Top-X% Pipeline  --  V0.6
 // Author 	: Kolja Hildenbrand
-// Date   	: 2026-05-27
+// Date   	: 2026-06-01
 // Status	: Current
 //
-// Changes vs v4.1.:
+// Changes vs V0.5:
+//  - CHANGE: The domain-list dialog (markers / combos / timepoints) is
+//            now ALWAYS shown at startup, pre-filled with the workflow
+//            standards (simple OK = defaults). Previously it only appeared
+//            in "dialog" mode. MODE now governs ONLY the per-image
+//            metadata source, not list editability.
+//
+// Changes vs v4.1. (V0.5):
 // ==========================================================
 //  - NEW:   Added composite JPG QC export via saveCompositeJpg().
 //           Saves merged RGB images with marker1, marker2, DAPI,
@@ -23,7 +30,7 @@
 //            original channel windows available.
 //
 //  - CHANGE: Updated cell-line defaults:
-//            VeroE6 artifact upper bound = 1000,
+//            VeroE6 artifact upper bound = 1500,
 //            Huh7 artifact upper bound = 2000.
 //
 //  - REMOVE: No major functionality removed.
@@ -84,7 +91,7 @@ var SAVE_MASKS         = true;   // binary mask TIFs (cell, nuc, cyto, artifact)
 var SAVE_COMPOSITE_JPG = true;   // 3-channel composite + cytosol outline (JPG)
 
 // Reproducibility
-var MACRO_VERSION = "0.5.0";
+var MACRO_VERSION = "0.6.0";
 
 // CSV header — columns added in V0.4 marked with /* V0.4 */
 var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
@@ -160,22 +167,25 @@ function askModeAndConfig() {
     THR_MODE  = Dialog.getRadioButton();
     CELL_LINE = Dialog.getRadioButton();
 
-    // Apply cell-line-specific defaults BEFORE the optional dialog-mode setup,
-    // so the user could (in theory) override them in the second dialog.
+    // Apply cell-line-specific defaults BEFORE the list dialog,
+    // so the user could (in theory) override them below.
     applyCellLineDefaults(CELL_LINE);
 
-    if (MODE == "dialog") {
-        Dialog.create("Pipeline setup (dialog mode)");
-        Dialog.addMessage("These values define CSV files and the per-image dialog options.\n"
-                        + "Lists are comma-separated. Whitespace is trimmed.");
-        Dialog.addString("Markers:",    arrToStr(MARKERS),       40);
-        Dialog.addString("Combos:",     arrToStr(ANALYSE_COMBI), 40);
-        Dialog.addString("Timepoints:", arrToStr(TIMEPOINTS),    20);
-        Dialog.show();
-        MARKERS       = parseCsvString(Dialog.getString());
-        ANALYSE_COMBI = parseCsvString(Dialog.getString());
-        TIMEPOINTS    = parseCsvString(Dialog.getString());
-    }
+    // ALWAYS show the domain-list dialog (Feature A): markers / combos /
+    // timepoints are editable at every startup, pre-filled with the
+    // workflow standards so a simple OK = use the defaults. This is
+    // independent of MODE (which only governs per-image metadata source).
+    Dialog.create("Pipeline setup");
+    Dialog.addMessage("These values define CSV files and the per-image dialog options.\n"
+                    + "Pre-filled with the workflow standards — just click OK to keep them.\n"
+                    + "Lists are comma-separated. Whitespace is trimmed.");
+    Dialog.addString("Markers:",    arrToStr(MARKERS),       40);
+    Dialog.addString("Combos:",     arrToStr(ANALYSE_COMBI), 40);
+    Dialog.addString("Timepoints:", arrToStr(TIMEPOINTS),    20);
+    Dialog.show();
+    MARKERS       = parseCsvString(Dialog.getString());
+    ANALYSE_COMBI = parseCsvString(Dialog.getString());
+    TIMEPOINTS    = parseCsvString(Dialog.getString());
 }
 
 // Cell-line-specific mask parameters. Called after CELL_LINE is known.
@@ -191,14 +201,14 @@ function applyCellLineDefaults(cellLine) {
         CELL_THR_FACTOR   = 0.5;
         BLUR_SIGMA_CELL   = 1;
         MIN_PARTICLE_SIZE = 100;
-        ARTIFACT_UPPER_BOUND = 1000;
+        ARTIFACT_UPPER_BOUND = 2500;
     } else {
         // Default = Huh7
         CELL_THR_METHOD   = "Li";
         CELL_THR_FACTOR   = 0.5;
         BLUR_SIGMA_CELL   = 1;
         MIN_PARTICLE_SIZE = 200;
-        ARTIFACT_UPPER_BOUND = 2000;
+        ARTIFACT_UPPER_BOUND = 2500;
     }
     print("Cell-line defaults applied for " + cellLine + ":");
     print("  CELL_THR_METHOD   = " + CELL_THR_METHOD);
