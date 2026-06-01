@@ -1,5 +1,5 @@
 // ==========================================================
-// Mock Top-X% Pipeline  --  V0.6
+// Mock Top-X% Pipeline  --  V0.6.1
 // Author 	: Kolja Hildenbrand
 // Date   	: 2026-06-01
 // Status	: Current
@@ -11,33 +11,16 @@
 //            in "dialog" mode. MODE now governs ONLY the per-image
 //            metadata source, not list editability.
 //
-// Changes vs v4.1. (V0.5):
+// Changes vs v6.1.:
 // ==========================================================
-//  - NEW:   Added composite JPG QC export via saveCompositeJpg().
-//           Saves merged RGB images with marker1, marker2, DAPI,
-//           and cytosol ROI outline.
-//
-//  - NEW:   Added SAVE_COMPOSITE_JPG output option.
-//
-//  - FIX:   Re-pins BlackBackground = true globally, per image,
-//           and after composite saving to prevent inverted binary masks.
-//
-//  - FIX:   Composite JPG creation now duplicates source channels
-//           before merging, avoiding LUT/display-state side effects
-//           on the original channel windows.
-//
-//  - CHANGE: Composite JPGs are saved before mask TIFFs to keep
-//            original channel windows available.
-//
-//  - CHANGE: Updated cell-line defaults:
-//            VeroE6 artifact upper bound = 1500,
-//            Huh7 artifact upper bound = 2000.
-//
-//  - REMOVE: No major functionality removed.
+// REMOVE: Cell line specific settings
+// CHANGE: Increased ARTIFACT_UPPER_BOUND to 2700
 // ==========================================================
 
 
 // ============== 1. CONFIG (globals via `var`) ==============
+// Reproducibility
+var MACRO_VERSION = "0.6.1";
 
 // Runtime state
 var INPUT_DIR;
@@ -53,7 +36,7 @@ var MARKERS       = newArray("HA568", "HA488", "dsRNA488", "NS4B568");
 var ANALYSE_COMBI = newArray("HA568_dsRNA488", "NS4B568_dsRNA488", "NS4B568_HA488");
 var TIMEPOINTS    = newArray("12h", "24h");
 
-// Thresholding — these become overwritten by applyCellLineDefaults()
+// Thresholding
 var CELL_THR_METHOD  = "Li";  // Li | Otsu | Triangle | Yen
 var NUC_THR_METHOD   = "Otsu";      // Otsu | Triangle
 var BLUR_SIGMA_CELL  = 1;           // micrometers (Gaussian "scaled")
@@ -72,7 +55,7 @@ var CELL_THR_FACTOR  = 0.5;
 // then ORed together so contamination in either channel is excluded from
 // the cytosol mask. Tune per dataset — real biology in Mock samples
 // typically peaks well below this.
-var ARTIFACT_UPPER_BOUND = 2000;
+var ARTIFACT_UPPER_BOUND = 2700;
 var ARTIFACT_DILATE_ITER = 20;       // expand artifact slightly to catch the rim
 
 // PARTICLE-SIZE FILTER (NEW V0.4)
@@ -89,9 +72,6 @@ var STAT_METHOD = "median_top_hist";
 var SAVE_QC            = true;   // single-channel marker1 + cytosol outline (PNG)
 var SAVE_MASKS         = true;   // binary mask TIFs (cell, nuc, cyto, artifact)
 var SAVE_COMPOSITE_JPG = true;   // 3-channel composite + cytosol outline (JPG)
-
-// Reproducibility
-var MACRO_VERSION = "0.6.0";
 
 // CSV header — columns added in V0.4 marked with /* V0.4 */
 var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
@@ -191,25 +171,6 @@ function askModeAndConfig() {
 // Cell-line-specific mask parameters. Called after CELL_LINE is known.
 // Add new cell lines as additional `else if` branches.
 function applyCellLineDefaults(cellLine) {
-    if (cellLine == "VeroE6") {
-        // Vero cells are ~4x smaller than Huh7 in our images → dim signal
-        // periphery is missed by conservative thresholds. Compensate with:
-        //  - more permissive threshold factor (0.3 vs 0.5)
-        //  - stronger smoothing (1.5 µm vs 1 µm)
-        //  - smaller min particle size (100 vs 200)
-        CELL_THR_METHOD   = "Li";
-        CELL_THR_FACTOR   = 0.5;
-        BLUR_SIGMA_CELL   = 1;
-        MIN_PARTICLE_SIZE = 100;
-        ARTIFACT_UPPER_BOUND = 2500;
-    } else {
-        // Default = Huh7
-        CELL_THR_METHOD   = "Li";
-        CELL_THR_FACTOR   = 0.5;
-        BLUR_SIGMA_CELL   = 1;
-        MIN_PARTICLE_SIZE = 200;
-        ARTIFACT_UPPER_BOUND = 2500;
-    }
     print("Cell-line defaults applied for " + cellLine + ":");
     print("  CELL_THR_METHOD   = " + CELL_THR_METHOD);
     print("  CELL_THR_FACTOR   = " + CELL_THR_FACTOR);
