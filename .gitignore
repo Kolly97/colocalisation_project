@@ -10,6 +10,8 @@
 images/
 # checkpoint jupyter notebook
 *-checkpoint.ipynb
+# Presentations
+*.pptx
 # Pipeline outputs
 measure_mock/
 qc/
