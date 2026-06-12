@@ -1,193 +1,163 @@
-# README for 01_Mock_background_pipeline_ijm
+# Colocalisation Pipeline — Fiji/ImageJ macros
 
-Fiji/ImageJ macro that measures the **Top X% brightest pixel statistics inside the
-cytosol** of each marker channel in Mock immunofluorescence images. The per‑image
-percentile values are aggregated downstream into the background values used by
-the second script (`2_SubBg_Coloc/`).
+Automated image-analysis pipeline for **confocal immunofluorescence colocalisation**
+in virus-infected cells, built in the **Bartenschlager lab** (Dept. of Infectious
+Diseases, Heidelberg). The macros measure a per-channel autofluorescence background on
+**Mock** (uninfected) images, subtract it from **infected (MOI)** images, build per-cell
+cytosol ROIs, and run the **Colocalisation Threshold** analysis (Manders / Pearson) per
+cell.
 
-> **Script (current):** `01_Mock_pipeline.ijm`
-> **Version:** `0.5.0` · **Status:** active
-> **Version history:** see [`CHANGELOG.md`](CHANGELOG.md) for all previous
-> versions and the changes between them. Older script files
-> (Version 0.1 - 0.4.1.) are kept in the repository on GitHub for traceability.
-
----
-
-## Where this script sits in the workflow
-
-```
-   raw .tif (Mock + MOI mixed)
-            │
-            │  ── only Mock images are processed ──
-            ▼
-   ┌──────────────────────────────────┐
-   │ THIS SCRIPT  (01_Mock_pipeline)  │  ← top‑X% statistics in cytosol
-   └──────────────────────────────────┘
-            │
-            │  per‑image CSVs (one row per image × marker)
-            ▼
-   manual aggregation (see "What to do with the output" below)
-            │
-            │  one background value per (cell line × tp × combo × marker)
-            ▼
-   ┌──────────────────────────────────┐
-   │ 2_SubBg_Coloc/ — subtract bg     │  ← values typed into its startup dialog
-   └──────────────────────────────────┘
-```
+This is research software intended for a publication: every run is timestamped and every
+output row carries the macro version + run ID, so results are reproducible and auditable.
 
 ---
 
-## What it does (in one paragraph)
+## The biology in one paragraph
 
-For each `Mock`‑containing `.tif` in the chosen input folder, the macro splits
-the channels, builds **cell**, **nucleus** and **cytosol** masks, cleans the
-cytosol mask of bright artefacts and small disconnected fragments, and then
-measures inside that cytosol the **histogram of each marker channel**. From
-the histogram it computes the top‑X% statistics (mean, median, std, threshold
-value at which the top‑X% pool starts) plus a series of whole‑cytosol
-percentiles (p95 … p99.9999) used for sanity / outlier detection. One row per
-(image × marker) is appended to a per‑(timepoint × combo) CSV.
+Cells (**Huh7**, large; **VeroE6**, ~4× smaller and dimmer) are either **Mock**
+(uninfected control), **MOI1** or **MOI5** (infected), fixed at **12 h** or **24 h**, and
+stained for two viral/host markers plus DAPI. Markers: `HA568`, `HA488`, `dsRNA488`,
+`NS4B568` (punctate replication-site signal; **dsRNA strongest, HA568 weakest**). **DAPI
+is always channel 3.** Three marker pairs are analysed (order = `marker1`=C1, `marker2`=C2):
+`HA568_dsRNA488`, `NS4B568_dsRNA488`, `NS4B568_HA488`. The question is *how much the two
+markers colocalise* in the cytosol of infected cells — which requires first removing the
+cell's intrinsic autofluorescence (measured on Mock) and restricting the measurement to a
+clean, unbiased cytosol ROI.
 
-For visual review it also saves the three binary masks (cell / nucleus /
-cytosol / artefact) as TIFs, a single‑channel **QC PNG** with the cytosol
-outline overlay, and an **8‑bit RGB composite JPG** with all three channels +
-cytosol outline for cross‑channel verification.
+---
+
+## The three-stage pipeline
+
+```
+ .czi  ──Bio-Formats──▶  .tif   (Mock + MOI images mixed in one folder, single z-plane, 16-bit)
+                          │
+   ┌──────────────────────┴───────────────────────────────────────────────┐
+   │ STAGE 1 — Mock background   (macros/1_Mock/01_Mock_pipeline.ijm)       │
+   │   For each MOCK image: cytosol mask → Top-X% pixel statistics per      │
+   │   marker channel → per-image CSVs.                                     │
+   └──────────────────────┬───────────────────────────────────────────────┘
+                          │   MANUAL aggregation (you, in Excel/pandas/R):
+                          │   median of the `p99_9995` column per
+                          │   (cell line × timepoint × combo × marker)
+                          ▼
+   ┌──────────────────────────────────────────────────────────────────────┐
+   │ STAGE 2 — Subtract bg + Coloc  (macros/2_SubBg_Coloc/02_…_v0.14.3.ijm) │
+   │   For each MOI image: subtract those bg values → build per-cell        │
+   │   cytosol ROIs (auto watershed OR manual draw) → run Colocalisation    │
+   │   Threshold per cell → one CSV row per ROI.                            │
+   └──────────────────────┬───────────────────────────────────────────────┘
+                          ▼
+            STAGE 3 — downstream stats / figures  (analysis/, not part of the macros)
+```
+
+**The link between Stage 1 and Stage 2 is manual and deliberate:** you read the Stage 1
+CSVs, take the **median of the `p99_9995` percentile** per group, and type those numbers
+into Stage 2's background dialog. (Why `p99_9995` and median: see the Mock
+[USAGE](macros/1_Mock/USAGE.md) — it is the robust upper tail of autofluorescence,
+insensitive to a few stray bright pixels or one bad image.)
+
+---
+
+## Repository layout
+
+```
+colocalisation_project/
+├── README.md                     ← you are here (project overview)
+├── CITATION.cff · LICENSE.txt
+├── macros/
+│   ├── HANDOFF.md                ← full project context / state (start here when resuming dev)
+│   ├── USAGE.md                  ← index → the two per-macro USAGE guides
+│   ├── ToDo.md
+│   ├── 1_Mock/
+│   │   ├── 01_Mock_pipeline.ijm  ← STAGE 1 (current, v0.8.1; edited in place)
+│   │   ├── README.md · USAGE.md · CHANGELOG.md
+│   └── 2_SubBg_Coloc/
+│       ├── 02_Subtract_background_coloc_v0.14.3.ijm  ← STAGE 2 (current — highest N)
+│       ├── 02_…_v0.2 … v0.14.2.ijm                   ← history (one file per version)
+│       ├── README.md · USAGE.md · CHANGELOG.md
+├── analysis/                     ← downstream notebooks (Stage 3)
+├── images/ · example_thomas/     ← data + supervisor reference (not the macros)
+└── _issues/ · _templates/ · _tutorials/
+```
+
+**Versioning conventions** (please keep):
+- **Stage 1 (Mock)** is edited **in place** — bump `MACRO_VERSION` in the header and add a
+  `CHANGELOG.md` entry.
+- **Stage 2 (Coloc)** keeps **one file per version** (`02_…_v0.N.ijm`); always run/edit the
+  **highest N**, and update `CHANGELOG.md` (+ `README.md`/`USAGE.md` when behaviour changes).
+- Every CSV row carries `macro_version` + `run_id`; outputs go in a `run_id`-named folder, so
+  parallel runs never overwrite and pandas can filter by run.
+
+---
+
+## The two macros at a glance
+
+| | Stage 1 — Mock | Stage 2 — SubBg + Coloc |
+|---|---|---|
+| **File** | `1_Mock/01_Mock_pipeline.ijm` (v0.8.1) | `2_SubBg_Coloc/02_…_v0.14.3.ijm` |
+| **Input** | Mock `.tif` (filename contains `mock`) | MOI `.tif` (filename contains `moi`) |
+| **Does** | Top-X% cytosol intensity stats per marker | subtract bg, per-cell ROIs, Colocalisation Threshold |
+| **Output** | per-image CSVs + masks + QC | bg-subtracted TIFs + numbered QC + per-ROI coloc CSV |
+| **Plugins** | none | **MorphoLibJ** (auto ROI) + **Colocalization Threshold** |
+| **Guide** | [README](macros/1_Mock/README.md) · [USAGE](macros/1_Mock/USAGE.md) · [CHANGELOG](macros/1_Mock/CHANGELOG.md) | [README](macros/2_SubBg_Coloc/README.md) · [USAGE](macros/2_SubBg_Coloc/USAGE.md) · [CHANGELOG](macros/2_SubBg_Coloc/CHANGELOG.md) |
 
 ---
 
 ## Requirements
 
-| Tool | Version | Notes |
-|---|---|---|
-| Fiji | ≥ 2.16.0 | bundled ImageJ ≥ 1.54p |
-
-No additional plugins or update sites required.
+- **Fiji** (ImageJ ≥ 1.54). Download: <https://fiji.sc>.
+- **Colocalization Threshold** plugin (Tony Collins / WCIF) — ships with standard Fiji,
+  under `Analyze ▸ Colocalisation ▸ Colocalisation Threshold`. *(Needed only for Stage 2's
+  coloc step.)*
+- **MorphoLibJ** (IJPB-plugins update site) — needed only for Stage 2's **automatic** ROI
+  mode (marker-controlled watershed). Install: `Help ▸ Update… ▸ Manage update sites ▸ tick
+  IJPB-plugins ▸ Apply ▸ restart`. Stage 2 hard-checks for it and aborts with instructions if
+  missing; **manual ROI mode and Stage 1 need no extra plugins.**
+- Input images **calibrated** (Bio-Formats `.czi → .tif` keeps the µm/px calibration, which
+  the watershed ring and scale bars rely on).
 
 ---
 
-## Input format
+## Filename schema (binding, positional, underscore-separated)
 
-A folder with `.tif` images. Only files whose filename contains `mock`
-(case‑insensitive) are processed; everything else is skipped automatically.
-
-Filename schema (positional, strict):
 ```
 <timepoint>_<cellLine>_<condition>_<marker1>_<marker2>_<coverslip>_<imgIndex>.tif
+e.g.  12h_Huh7_Mock_HA568_dsRNA488_CS1_1.tif      24h_VeroE6_MOI5_NS4B568_HA488_CS2_3.tif
 ```
-Example: `12h_Huh7_Mock_HA568_dsRNA488_CS1_1.tif`
 
-| Position | Token | Allowed defaults |
-|---|---|---|
-| 0 | timepoint | `12h`, `24h` |
-| 1 | cell line | `Huh7`, `VeroE6` |
-| 2 | condition | `Mock`, `MOI1`, `MOI5` |
-| 3 | marker 1 (→ C1) | `HA568`, `HA488`, `dsRNA488`, `NS4B568` |
-| 4 | marker 2 (→ C2) | same set, must differ from marker 1 |
-| 5 | coverslip | starts with `CS` |
-| 6 | image index | integer |
+| token | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| field | timepoint | cell line | condition | marker1 → **C1** | marker2 → **C2** | coverslip | index |
 
-**C3 is always DAPI** by acquisition convention.
+Both macros let you **remap which token holds marker1 / marker2 / timepoint** at startup, so
+other naming layouts work. **Cell line is chosen in a dialog, not parsed.** **C3 is always
+DAPI.** Stage 1 only processes files containing `mock`; Stage 2 only files containing `moi`.
 
 ---
 
 ## Quick start
 
-1. Open Fiji.
-2. **Plugins → Macros → Edit…** → open `macros/1_Mock/01_Mock_pipeline.ijm`.
-3. **Run** (`Cmd/Ctrl + R`).
-4. Folder dialog → pick the folder with your `.tif` images.
-5. Mode dialog → choose:
-   - **Mode**: `filename` (parse from name) or `dialog` (ask per image)
-   - **Threshold mode**: `automatic` or `manual`
-   - **Cell line**: `Huh7` or `VeroE6` (applies tuned defaults)
-6. Macro loops over all Mock images and writes outputs into
-   `<input>/measure_mock/<RUN_ID>/` (one subfolder per run, timestamped).
-7. When the Log shows `=== DONE ===`, the CSVs, masks, QC PNGs, composite JPGs
-   and a copy of the Log are all in that subfolder.
+1. Install Fiji (+ MorphoLibJ if you'll use Stage 2 auto mode).
+2. **Stage 1:** open `macros/1_Mock/01_Mock_pipeline.ijm` in Fiji → Run → point it at your
+   image folder. Follow [the Mock USAGE](macros/1_Mock/USAGE.md). Aggregate the CSVs
+   (median `p99_9995` per group).
+3. **Stage 2:** open `macros/2_SubBg_Coloc/02_…_v0.14.3.ijm` → Run → type the Stage 1 medians
+   into the background dialog. Follow [the Coloc USAGE](macros/2_SubBg_Coloc/USAGE.md).
+
+Both macros are **batch** (loop over a whole folder) and write a timestamped output folder
+plus a copy of the IJ Log for provenance.
 
 ---
 
-## What to do with the output (manual aggregation step)
+## Status & contact
 
-The CSVs are **per‑image** values. To use them as a background value in the next
-script, you have to aggregate them per `(cell line × timepoint × combo × marker)`
-group. Recommended procedure:
+The macros are feature-complete and in the **optimisation + documentation** phase; the
+automatic Stage-2 ROI parameters are still being tuned on real data (see
+`macros/2_SubBg_Coloc/CHANGELOG.md` v0.14.x and `macros/HANDOFF.md`). The coloc **numbers
+are not auto-parsed** from the plugin — the macro writes one provenance row per ROI and you
+read/export the values from the plugin window (the numbered QC tells you which row is which
+cell).
 
-1. Open the relevant CSV in Excel / pandas / R. Each row is one Mock image.
-2. **Pick the `p99_9995` column** as the background value source.
-   - This is the 99.9995% percentile of the cytosol pixel intensities — the
-     upper tail of Mock autofluorescence, but robust to the very last few
-     outlier pixels (which `p99.9999` or `max` would be sensitive to).
-   - Below this percentile is "typical Mock background"; above it is mostly
-     artefacts and the very last noise spikes. Subtracting this from infected
-     samples gives a conservative, defensible background floor.
-3. Compute the **median of `p99_9995` across all images** in the group.
-   - Median (not mean) because a single bad image with a stray bright spot
-     should not move the threshold.
-4. Note that median value for each `(cell line, timepoint, combo, marker)`.
-
-You'll end up with one table — typically 12 entries for our current setup
-(2 timepoints × 3 combos × 2 markers per combo).
-
-5. Start the second script (`02_background_subtraction_coloc_pipeline.ijm`). When the **Background values** dialog opens, type these median values into the matching fields.
-   That dialog is built dynamically from the same `TIMEPOINTS × ANALYSE_COMBI`
-   lists, so the field labels match the CSV groups one‑to‑one.
-
----
-
-## Output structure (brief)
-
-```
-measure_mock/
-└── <RUN_ID>/                                  # e.g. 20260527_2243
-    ├── <CellLine>_mock_<tp>_<marker>_in_<combo>.csv
-    │   ...   (one CSV per timepoint × combo × marker)
-    ├── masks/
-    │   ├── <RUN_ID>_<imgname>_cell.tif
-    │   ├── <RUN_ID>_<imgname>_nuc.tif
-    │   ├── <RUN_ID>_<imgname>_cyto.tif
-    │   └── <RUN_ID>_<imgname>_artifact.tif
-    ├── qc/
-    │   ├── <RUN_ID>_<imgname>_qc.png          # single channel + cytosol outline
-    │   └── <RUN_ID>_<imgname>_composite.jpg   # 3‑channel RGB + cytosol outline
-    └── macro_log_<RUN_ID>.txt
-    └── mock_analysis/
-    		└── <CellLine>_mock_background_analysis.csv
-```
-
-The QC files exist to verify visually that the cytosol mask is correct — that
-artefacts are excluded, that nuclei are excluded, that the outline follows the
-real cell shape. **Always look at a handful** before trusting a CSV.
-
----
-
-## Configuration: what to change when samples change
-
-All tunable parameters live in the `// CONFIG` block at the top of the script.
-
-| Change | Variable to edit |
-|---|---|
-| New cell line (e.g. A549) | add option to `Cell line` radio in `askModeAndConfig`, add an `else if` branch in `applyCellLineDefaults` |
-| New timepoint (e.g. 48h) | `TIMEPOINTS` |
-| New marker | `MARKERS` **and** `ANALYSE_COMBI` (add at least one combo using it) |
-| Different top‑X% | `TOP_PCT` |
-| Different threshold method | `CELL_THR_METHOD`, `NUC_THR_METHOD` |
-| Stricter / more permissive cell mask | `CELL_THR_FACTOR` (lower = more permissive) |
-| Artefact upper cutoff | `ARTIFACT_UPPER_BOUND` (per‑cell‑line in `applyCellLineDefaults`) |
-| Min disconnected region size | `MIN_PARTICLE_SIZE` |
-
-After any change, bump `MACRO_VERSION` so the provenance column in the CSV
-distinguishes runs made with the new settings, and add the change to
-`CHANGELOG.md`.
-
----
-
-## Note on documentation
-
-This README is a **high‑level overview**. A separate `USAGE.md` is planned with
-detailed step‑by‑step instructions. For further questions contact Kolja Hildenbrand
-
-> [!IMPORTANT]
->
-> Kolja.Hildenbrand@gmail.com
-
+- **Author:** Kolja Hildenbrand — Kolja.Hildenbrand@gmail.com
+- **Licence:** see [`LICENSE.txt`](LICENSE.txt) · **Citation:** see [`CITATION.cff`](CITATION.cff)
+- **Dev context / handover:** [`macros/HANDOFF.md`](macros/HANDOFF.md)
