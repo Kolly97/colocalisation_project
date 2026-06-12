@@ -10,6 +10,13 @@
 | v0.4.0  | Added artifact exclusion, cytosol particle-size filtering, and cell-line-specific defaults. |
 | v0.4.1  | Strengthened artifact handling, added extra high-percentile outputs, and saved full FIJI log files. |
 | v0.5.0  | Added composite RGB JPG QC export and improved binary mask stability with repeated BlackBackground pinning. |
+| v0.6.0  | Domain-list dialog (markers/combos/timepoints) is now always shown at startup, pre-filled with the workflow standards. |
+| V0.6.1  | Removed cell line specific settings for `MIN_PARTICLE_SIZE`and `ARTIFACT_UPPER_BOUND` to make macro more versatile |
+| v0.7.0  | Adaptive per-channel artifact bound replacing the fixed global ARTIFACT_UPPER_BOUND; per-image/per-channel threshold logged; CSV `artifact_upper_bound` → `artifact_bound`. (First tried a Q3+K·IQR fence — see v0.7.1.) |
+| v0.7.1  | Corrected the artifact bound to anchor on the autofluorescence top (`cut = ARTIFACT_MULT·p99.9`, cut only if max > cut). Fixes the IQR fence sitting in the dim bulk and over-cutting; clean images are no longer trimmed. Knob `ARTIFACT_K` → `ARTIFACT_MULT`; CSV `artifact_k` → `artifact_mult`. |
+| v0.7.2  | Artifact bound is now a robust "centre + k·spread" fence: `thr = mean_bulk + ARTIFACT_K·std_bulk` over cytosol pixels >0 with the top ~1% excluded (so artifacts can't inflate the std), cut only if a separated population exists (`max > ARTIFACT_SEP·thr`). Knob `ARTIFACT_K`; CSV `artifact_mult` → `artifact_k`. |
+| v0.8.0  | Reverted the adaptive bound back to a single FIXED `ARTIFACT_UPPER_BOUND` (set high) for all channels — removes only extreme dust; the particle-size filter + cross-image median handle the rest. Removed `computeArtifactBound()`; faster. Logs the per-channel cytosol max per image AND writes it to the CSV as `cyto_max_raw` (to help tune the bound). CSV second artifact column back to `artifact_upper_bound`. |
+| v0.8.1  | **Flexible filename tokens** (current). A startup dialog (`askTokenMapping`, "filename" mode) shows the first file and lets you pick via radio buttons which underscore token holds timepoint / marker1 / marker2 (`TOK_TP/M1/M2`). **Cell line is no longer parsed** from the name — it is the startup dialog choice — so any naming layout works. |
 
 ---
 
@@ -245,3 +252,179 @@ This version automatically processes all Mock .tif images in a selected input fo
 
 ### Removed
 - No major functionality removed in this version.
+
+---
+## v0.6.0
+**Major changes**
+- Domain-list dialog always shown at startup
+
+### Changed
+- The setup dialog asking for **markers**, **combos**, and **timepoints** is now shown on
+  every run, pre-filled with the workflow standards (a plain OK keeps the defaults).
+  Previously this dialog only appeared when the startup **MODE** was `dialog`.
+- **MODE** (`filename` / `dialog`) now controls ONLY the per-image metadata source,
+  no longer whether the domain lists are editable.
+
+### Fixed
+- No bug fixes in this version.
+
+### Removed
+- Removed the `if (MODE == "dialog")` gate around the list-setup dialog.
+
+---
+## v0.6.1
+
+**Major changes**
+
+- Removed cell line specific settings for `MIN_PARTICLE_SIZE`and `ARTIFACT_UPPER_BOUND`
+
+### Changed
+
+- Changed ARTIFACT_UPPER_BOUND to 2700
+
+### Fixed
+
+- No bug fixes in this version.
+
+### Removed
+
+- Cell line specific settings
+
+---
+
+## v0.7.0
+
+**Major change**
+- **Adaptive, per-channel artifact bound** replacing the fixed global `ARTIFACT_UPPER_BOUND`.
+
+### Problem (in the fixed-bound approach)
+A single `ARTIFACT_UPPER_BOUND` was applied to every channel. But the channels live in very
+different intensity regimes: **dsRNA** Mock autofluorescence is genuinely high and its real top
+pixels exceeded the bound, so they were wrongly excluded as "artifact" — **deflating the dsRNA
+background**. Raising the global bound to spare dsRNA then let real dust survive in the dimmer
+**HA / NS4B** channels — **inflating their background**. A fixed absolute number cannot serve all
+channels and does not generalise to new samples/markers.
+
+### Fix
+An artifact is defined **relative to each channel's own autofluorescence**, not as a fixed
+intensity. The bound is computed per image+channel from that channel's **cytosol** pixels.
+
+> **Formula evolution:** v0.7.0 first tried a Tukey/IQR fence `Q3 + K·(Q3−Q1)`. On real data
+> this failed: the cytosol is mostly dim with a sparse bright tail, so `Q1/Q3` sat in the dark
+> bulk (e.g. `Q1=10 Q3=44`), the `IQR` was tiny, and even `K=10` produced bounds of a few hundred
+> — *far below* the real signal — so it cut autofluorescence and even trimmed artifact-free
+> images. **v0.7.1 replaced it** with a top-anchored, separation-based rule.
+
+**v0.7.1 rule** — anchor on the autofluorescence top (its 99.9th percentile, robust because dust
+is < 0.1 % of cytosol pixels) and only cut when a **separated** bright population exists:
+
+```
+cut = ARTIFACT_MULT * p99.9
+if (max_intensity > cut)  ->  bound = cut      // artifacts present, cut above
+else                      ->  no cut           // bright tail is just autofluorescence
+```
+
+This gives both desired behaviours: a sensible high threshold (not buried in the dim bulk), and
+**nothing is cut on artifact-free images**.
+
+### Added
+- **`ARTIFACT_MULT`** — the single knob (default `3.0`): "a pixel is an artifact if it is more than
+  MULT× brighter than the channel's 99.9th percentile." Larger = more conservative.
+  (`ARTIFACT_ANCHOR_PCTL`, default 99.9, is the secondary anchor.)
+- **`computeArtifactBound()`** — reuses the existing `pctIndex()` histogram percentile code and
+  **logs the per-image, per-channel decision**, e.g.
+  `artifact bound  C1 dsRNA : p50=120 p99.9=2400 max=61000 | cut@ MULT(3)xp99.9 = 7200 -> CUT above (bound=7200)`.
+- Degenerate guards: empty cytosol / `p99.9 == 0` → no cut.
+
+### Changed
+- `makeArtifactMaskFor` / `buildCombinedArtifactMask` / `cleanCytosolMask` / `measureAndWrite` /
+  `appendCsvRow` now take the per-channel bound as a parameter; `makeArtifactMaskFor` builds an
+  empty mask when the bound says "no cut".
+- CSV: column `artifact_upper_bound` → **`artifact_bound`** (the per-channel value actually used)
+  plus new column **`artifact_mult`**.
+
+### Removed
+- The fixed global `ARTIFACT_UPPER_BOUND` variable, and the abandoned `ARTIFACT_K`/IQR fence.
+
+### Notes
+- Mock-only. Script 2 (MOI) must NOT upper-cut bright pixels (there the bright pixels are the real
+  specific signal), so this fence is deliberately not propagated to the coloc pipeline.
+
+---
+## v0.7.2
+**Major change**
+- Artifact bound switched to a robust **"centre + k·spread"** fence per channel (the user's
+  mean+k·std idea, made robust), replacing the v0.7.1 `MULT·p99.9` anchor.
+
+### Why
+A `mean + k·std` fence is intuitive and (unlike the v0.7.0 IQR fence) its `std` "feels" the bright
+tail, so it sits at a sensible height. But plain mean/std are **not robust**: the artifacts inflate
+the very `std` meant to detect them (the *masking* effect), and the fence assumes ~normal data while
+fluorescence is heavily skewed. v0.7.2 keeps the idea but fixes both with trimming + a gate.
+
+### Method
+```
+bulk  = cytosol pixels > 0, EXCLUDING the top ARTIFACT_TRIM_PCT %   (default 1 %)
+thr   = mean_bulk + ARTIFACT_K * std_bulk                            (K default 5)
+cut only if  max > ARTIFACT_SEP * thr   (separated dust)  else no cut (SEP default 2)
+```
+- Trimming the top 1 % stops artifacts from corrupting `std_bulk` → stable image-to-image.
+- The **separation gate** preserves the "artifact-free image → cut nothing" behaviour.
+- **Honest limitation:** trimming makes `std_bulk` underestimate the autofluorescence spread, so
+  `thr` can land inside the real tail; the gate is what protects clean images, and `ARTIFACT_K`
+  lifts `thr` clear of the autofluorescence. A center+spread value sets *where* "bright" begins,
+  never *whether* dust exists — the gate answers the latter.
+
+### Added
+- `ARTIFACT_K` (knob, std multiplier), `ARTIFACT_SEP` (separation guard), `ARTIFACT_TRIM_PCT`
+  (bulk trim). `computeArtifactBound()` logs `mean_b / std_b / thr / max / decision` per channel.
+
+### Changed
+- CSV second artifact column `artifact_mult` → **`artifact_k`** (`artifact_bound` = `thr` or no-cut).
+
+### Removed
+- `ARTIFACT_MULT` / `ARTIFACT_ANCHOR_PCTL` (the p99.9-anchor knobs).
+
+### Possible next steps (not implemented)
+- Compute the fence on a **log scale** (fluorescence ≈ log-normal → `k` maps to a real tail
+  probability).
+- If center+spread still over/under-cuts, a true **gap/valley detector** between the
+  autofluorescence tail and the dust population.
+
+---
+## v0.8.0
+**Major change**
+- **Reverted** the artifact bound to a single **fixed `ARTIFACT_UPPER_BOUND`** (set high) for all
+  channels. The adaptive per-channel attempts (v0.7.0 IQR, v0.7.1 p99.9, v0.7.2 trimmed mean+std)
+  were all hard to calibrate on this data.
+
+### Rationale
+A high fixed threshold (5000) removes only **extreme** dust/debris and leaves real
+autofluorescence untouched, even in brighter images. We accept that a few moderate artifacts stay
+in the cytosol, because:
+- the **particle-size filter** (`MIN_PARTICLE_SIZE`) removes most of them, and
+- the background value used downstream is the **median across ~30 images**, which is robust to a
+  few contaminated pixels in any single image.
+  Bonus: dropping the per-channel histogram/percentile pass makes the run **faster**.
+
+### Added
+- **`logChannelMaxInCytosol()`** — returns AND logs the brightest RAW pixel of each marker channel
+  **within the cytosol** per image (computed before artifact removal, so a present artifact still
+  registers). Lets you see where artifacts sit (e.g. `max=21340` vs `max=3800`) and pick
+  `ARTIFACT_UPPER_BOUND` accordingly. Persisted in `macro_log_<RUN_ID>.txt`.
+- **CSV column `cyto_max_raw`** — that per-channel pre-cleanup cytosol max written to every row
+  (threaded `logChannelMaxInCytosol → processOneImage → measureAndWrite → appendCsvRow`), so the
+  values can be sorted/plotted across the dataset to calibrate `ARTIFACT_UPPER_BOUND`.
+
+### Removed
+- `computeArtifactBound()` and the `ARTIFACT_K` / `ARTIFACT_SEP` / `ARTIFACT_TRIM_PCT` knobs.
+
+### Changed
+- `makeArtifactMaskFor` / `buildCombinedArtifactMask` / `cleanCytosolMask` no longer take a
+  per-channel bound parameter; `measureAndWrite` / `appendCsvRow` now take a `cytoMax` parameter
+  (for the `cyto_max_raw` column).
+- CSV second artifact column back to **`artifact_upper_bound`** (= the fixed value).
+
+### Notes
+- The adaptive code is preserved in the v0.7.0–0.7.2 history above, should per-channel
+  artifact handling be revisited (e.g. via the log-scale / gap-detector routes noted under v0.7.2).
