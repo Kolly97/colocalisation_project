@@ -1,26 +1,50 @@
 // ==========================================================
-// Mock Top-X% Pipeline  --  V0.6.1
+// Mock Top-X% Pipeline  --  V0.8.1
 // Author 	: Kolja Hildenbrand
-// Date   	: 2026-06-01
+// Date   	: 2026-06-02
 // Status	: Current
+//
+// Changes vs V0.8.0:
+//  - NEW: Flexible filename tokens. In "filename" mode a startup dialog
+//         (askTokenMapping) shows the first filename and lets you pick (via
+//         radio buttons) which underscore token holds marker1 / marker2 /
+//         timepoint (TOK_M1/M2/TP). Cell line is NO LONGER parsed from the
+//         name — it is the startup dialog choice. Works with any naming layout.
+//
+// Changes vs V0.7.2:
+//  - REVERT: Back to a single FIXED ARTIFACT_UPPER_BOUND for all channels
+//            (the adaptive per-channel bounds of V0.7.0–0.7.2 were hard to
+//            calibrate on this data). Set HIGH (5000) so it removes only the
+//            most extreme dust and leaves real autofluorescence intact even
+//            in brighter images. Most artifacts are caught by the particle-
+//            size filter; the cross-image MEDIAN absorbs the rest. Also
+//            faster: no per-channel histogram/percentile pass.
+//  - REMOVE: computeArtifactBound() and the ARTIFACT_K / ARTIFACT_SEP /
+//            ARTIFACT_TRIM_PCT knobs.
+//  - NEW:    logs the max pixel intensity per marker channel (within the
+//            cytosol, before artifact removal) for every image — so you can
+//            see where artifacts sit (e.g. 20000 vs 4000) and tune
+//            ARTIFACT_UPPER_BOUND.
+//	- NEW:	Max pixel value in csv file as cyto_max_raw
+//	- CHANGED	CELL_LINE as newArray to make cell line selection more flexible
+//  - CSV:    second artifact column back to `artifact_upper_bound`.
+//
+//	- HISTORY: 
+//	V0.7.0 tried a Q3+K*IQR fence
+//	V0.7.1 MULT*p99.9; 
+//	V0.7.2 a trimmed mean+k*std fence with a separation gate — all reverted here.)
 //
 // Changes vs V0.5:
 //  - CHANGE: The domain-list dialog (markers / combos / timepoints) is
 //            now ALWAYS shown at startup, pre-filled with the workflow
-//            standards (simple OK = defaults). Previously it only appeared
-//            in "dialog" mode. MODE now governs ONLY the per-image
-//            metadata source, not list editability.
-//
-// Changes vs v6.1.:
-// ==========================================================
-// REMOVE: Cell line specific settings
-// CHANGE: Increased ARTIFACT_UPPER_BOUND to 2700
+//            standards (simple OK = defaults). MODE governs ONLY the
+//            per-image metadata source, not list editability.
 // ==========================================================
 
 
 // ============== 1. CONFIG (globals via `var`) ==============
 // Reproducibility
-var MACRO_VERSION = "0.6.1";
+var MACRO_VERSION = "0.8.1";
 
 // Runtime state
 var INPUT_DIR;
@@ -29,12 +53,19 @@ var MEASURE_DIR_RUN_ID;
 var RUN_ID;
 var MODE;             // "filename" or "dialog"
 var THR_MODE;         // "manual" or "automatic"
-var CELL_LINE = "Huh7";  // overwritten by dialog
+var CELL_LINE = newArray("Huh7", "VeroE6", "Other cell line");  // type in cell lines in workflow, will be later overwritten by dialog
 
 // Lists used by CSV setup and per-image dialog
 var MARKERS       = newArray("HA568", "HA488", "dsRNA488", "NS4B568");
 var ANALYSE_COMBI = newArray("HA568_dsRNA488", "NS4B568_dsRNA488", "NS4B568_HA488");
 var TIMEPOINTS    = newArray("12h", "24h");
+
+// Filename token mapping (set by askTokenMapping at startup in "filename" mode;
+// defaults match the standard schema tp_cellLine_cond_m1_m2_CS#_idx). Cell line
+// is NOT parsed — it comes from the startup dialog.
+var TOK_M1 = 3;
+var TOK_M2 = 4;
+var TOK_TP = 0;
 
 // Thresholding
 var CELL_THR_METHOD  = "Li";  // Li | Otsu | Triangle | Yen
@@ -49,13 +80,17 @@ var NUC_CLOSE_ITER   = 2;
 // where the auto method is too conservative on dim periphery.
 var CELL_THR_FACTOR  = 0.5;
 
-// ARTIFACT EXCLUSION (NEW V0.4)
-// Pixels with intensity > ARTIFACT_UPPER_BOUND are treated as artifacts
-// (dust, fluorescent debris). Detected in EACH marker channel separately,
-// then ORed together so contamination in either channel is excluded from
-// the cytosol mask. Tune per dataset — real biology in Mock samples
-// typically peaks well below this.
-var ARTIFACT_UPPER_BOUND = 2700;
+// ARTIFACT EXCLUSION — FIXED upper-bound (V0.7.3, reverted)
+// Adaptive per-channel bounds (V0.7.0–0.7.2) proved hard to calibrate on this
+// data, so we are back to a single fixed threshold for ALL channels: a pixel
+// brighter than ARTIFACT_UPPER_BOUND is treated as an artifact and excluded
+// from the cytosol. It is set deliberately HIGH (5000) so it removes only the
+// most extreme dust/debris and leaves real autofluorescence intact — even in
+// brighter images. The bulk of artifacts is caught by the particle-size filter
+// below, and the downstream cross-image MEDIAN of the background is robust
+// enough to absorb the few artifact pixels that remain in any single image.
+// Bonus: no per-channel histogram/percentile pass -> faster.
+var ARTIFACT_UPPER_BOUND = 4000;
 var ARTIFACT_DILATE_ITER = 20;       // expand artifact slightly to catch the rim
 
 // PARTICLE-SIZE FILTER (NEW V0.4)
@@ -65,7 +100,7 @@ var ARTIFACT_DILATE_ITER = 20;       // expand artifact slightly to catch the ri
 var MIN_PARTICLE_SIZE = 200;
 
 // Top-percentile measurement
-var TOP_PCT     = 1.0;
+var TOP_PCT     = 0.01;
 var STAT_METHOD = "median_top_hist";
 
 // Output flags
@@ -79,7 +114,7 @@ var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
                + "macro_mode,threshold_mode,"
                + "threshold_value,n_top_pixels,n_cyto_pixels,n_artifacts_excluded," /* V0.4 */
                + "mean_top,median_top,std_top,"
-               + "p95,p99,p99_25,p99_5,p99_9,p99_95,p99_99,p99_995,p99_999,p99_9995,p99_9999,"
+               + "p95,p99,p99_25,p99_5,p99_9,p99_95,p99_99,p99_995,p99_999,p99_9995,p99_9999,cyto_max_raw,"
                + "cell_thr_method,nuc_thr_method,cell_thr_factor," /* V0.4 */
                + "blur_sigma_cell,blur_sigma_nuc,"
                + "artifact_upper_bound,min_particle_size," /* V0.4 */
@@ -100,6 +135,9 @@ askModeAndConfig();   // also calls applyCellLineDefaults()
 RUN_ID = makeRunId();
 buildOutputDir();
 mockFiles = listMockFiles();
+// In "filename" mode, map which filename token holds marker1 / marker2 /
+// timepoint (cell line is the dialog choice, not parsed).
+if (MODE == "filename" && mockFiles.length > 0) askTokenMapping(mockFiles[0]);
 initCsvFiles();
 
 print("=== Mock pipeline V" + MACRO_VERSION + " | run_id=" + RUN_ID + " | mode=" + MODE + " ===");
@@ -140,8 +178,7 @@ function askModeAndConfig() {
     Dialog.addRadioButtonGroup("Threshold mode:",
         newArray("manual", "automatic"), 2, 1, "automatic");
     Dialog.addMessage("What cell line are you analysing?");
-    Dialog.addRadioButtonGroup("Cell line:",
-        newArray("Huh7", "VeroE6"), 2, 1, "Huh7");
+    Dialog.addRadioButtonGroup("Cell line:", CELL_LINE, CELL_LINE.length, 1, CELL_LINE[0]);
     Dialog.show();
     MODE      = Dialog.getRadioButton();
     THR_MODE  = Dialog.getRadioButton();
@@ -176,7 +213,7 @@ function applyCellLineDefaults(cellLine) {
     print("  CELL_THR_FACTOR   = " + CELL_THR_FACTOR);
     print("  BLUR_SIGMA_CELL   = " + BLUR_SIGMA_CELL);
     print("  MIN_PARTICLE_SIZE = " + MIN_PARTICLE_SIZE);
-    print("  ARTIFACT_UPPER_BOUND = " + ARTIFACT_UPPER_BOUND);
+    print("  ARTIFACT_UPPER_BOUND = " + ARTIFACT_UPPER_BOUND + " (fixed, all channels)");
     print("  ARTIFACT_DILATE_ITER = " + ARTIFACT_DILATE_ITER);
 }
 
@@ -291,9 +328,17 @@ function processOneImage(fname) {
     }
     makeCytosolMask();
 
-    // ---- NEW V0.4: artifact + particle cleanup -----------
-    // cleanCytosolMask returns how many pixels were removed by artifact
-    // exclusion (informational, written to CSV for QC tracking).
+    // Brightest pixel per marker channel WITHIN the cytosol, BEFORE artifact
+    // removal — so any artifact still shows up as the max. Logged AND written to
+    // the CSV (cyto_max_raw) so you can see where artifacts sit (e.g. 20000 vs
+    // 4000) and tune ARTIFACT_UPPER_BOUND.
+    cytoMaxM1 = logChannelMaxInCytosol(m1 + "_channel", m1, "C1");
+    cytoMaxM2 = logChannelMaxInCytosol(m2 + "_channel", m2, "C2");
+
+    // ---- artifact + particle cleanup ---------------------
+    // Fixed high upper-bound (V0.7.3): removes only extreme dust; the particle
+    // filter + cross-image median handle the rest. cleanCytosolMask returns how
+    // many pixels were removed by artifact exclusion (written to the CSV).
     nArtifactsExcluded = cleanCytosolMask(m1, m2);
 
     // Guard: empty / too-small cytosol = nothing meaningful to measure
@@ -317,8 +362,8 @@ function processOneImage(fname) {
     }
 
     // ---- measure each marker ------------------------------
-    measureAndWrite(m1, m1 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, imgName, cellLine, tp, comboKey);
-    measureAndWrite(m2, m2 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, imgName, cellLine, tp, comboKey);
+    measureAndWrite(m1, m1 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, cytoMaxM1, imgName, cellLine, tp, comboKey);
+    measureAndWrite(m2, m2 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, cytoMaxM2, imgName, cellLine, tp, comboKey);
 
     // ---- save artefacts -----------------------------------
     // Order matters: composite JPG must come BEFORE saveMasksTif,
@@ -333,14 +378,64 @@ function processOneImage(fname) {
 
 function tryParseFilename(imgName) {
     tokens = split(imgName, "_");
-    if (tokens.length < 7) return newArray();
-    tp_       = tokens[0];
-    cellLine_ = tokens[1];
-    m1_       = tokens[3];
-    m2_       = tokens[4];
+    needed = TOK_M1;
+    if (TOK_M2 > needed) needed = TOK_M2;
+    if (TOK_TP > needed) needed = TOK_TP;
+    if (tokens.length <= needed) return newArray();
+    tp_       = tokens[TOK_TP];
+    m1_       = tokens[TOK_M1];
+    m2_       = tokens[TOK_M2];
     if (!inArray(m1_, MARKERS) || !inArray(m2_, MARKERS)) return newArray();
     if (!inArray(tp_, TIMEPOINTS))                       return newArray();
-    return newArray(tp_, cellLine_, m1_, m2_);
+    // Cell line is NOT parsed from the name — it is the startup dialog choice.
+    return newArray(tp_, CELL_LINE, m1_, m2_);
+}
+
+// ------------------------------
+// Let the user map which underscore-token of the filename holds marker1,
+// marker2 and timepoint (cell line is the dialog choice). Shown once at startup
+// in "filename" mode. Sets globals TOK_M1 / TOK_M2 / TOK_TP.
+// ------------------------------
+function askTokenMapping(sampleFile) {
+    base = sampleFile;
+    if (lastIndexOf(base, ".") > 0) base = substring(base, 0, lastIndexOf(base, "."));
+    tokens = split(base, "_");
+    n = tokens.length;
+    // Leading "" forces STRING concatenation (numeric "+" showed NaN in the dialog).
+    labels = newArray(n);
+    for (i = 0; i < n; i = i + 1) labels[i] = "" + i + ": " + tokens[i];
+
+    defM1 = labelAtOr(labels, TOK_M1, 0);
+    defM2 = labelAtOr(labels, TOK_M2, n-1);
+    defTp = labelAtOr(labels, TOK_TP, 0);
+
+    // Radio button groups so all tokens are visible and double-assignment is obvious.
+    Dialog.create("Filename token mapping");
+    Dialog.addMessage("Example file:\n  " + sampleFile + "\n\n"
+        + "Pick which token holds each field (cell line comes from the dialog, not the name).");
+    Dialog.addRadioButtonGroup("Token of timepoint:", labels, 1, n, defTp);
+    Dialog.addRadioButtonGroup("Token of marker 1:",  labels, 1, n, defM1);
+    Dialog.addRadioButtonGroup("Token of marker 2:",  labels, 1, n, defM2);
+    Dialog.show();
+
+    // get* in the same order as add*; tokenIndexOf parses the leading "N:".
+    TOK_TP = tokenIndexOf(Dialog.getRadioButton());
+    TOK_M1 = tokenIndexOf(Dialog.getRadioButton());
+    TOK_M2 = tokenIndexOf(Dialog.getRadioButton());
+    print("Token mapping: timepoint=tok" + TOK_TP + ", marker1=tok" + TOK_M1 + ", marker2=tok" + TOK_M2);
+}
+
+function labelAtOr(labels, idx, fallback) {
+    if (idx >= 0 && idx < labels.length) return labels[idx];
+    return labels[fallback];
+}
+
+function tokenIndexOf(choiceLabel) {
+    c = indexOf(choiceLabel, ":");
+    if (c < 0) return 0;
+    r = parseInt(substring(choiceLabel, 0, c));
+    if (isNaN(r)) return 0;
+    return r;
 }
 
 function askImageMetadata(imgLabel, defTp, defCellLine, defM1, defM2) {
@@ -492,7 +587,7 @@ function makeCytosolMask() {
 // ============== 5b. ARTIFACT + PARTICLE CLEANUP (V0.4) =====
 //
 // Strategy:
-//   1) Build per-channel artifact masks (pixel > ARTIFACT_UPPER_BOUND).
+//   1) Build per-channel artifact masks (pixel > the channel's adaptive bound).
 //   2) OR them into one combined Artifact_Mask. Pixels too bright in
 //      EITHER channel are excluded — important for downstream coloc,
 //      where an artifact in one channel must not be measured against
@@ -510,8 +605,42 @@ function makeCytosolMask() {
 // the Mock median (we only need to drop the worst outliers).
 // ===========================================================
 
+// V0.7.3: simple FIXED upper-bound artifact exclusion. A pixel brighter than
+// ARTIFACT_UPPER_BOUND (same value for every channel) is treated as an artifact.
+// Set deliberately HIGH (5000) so it removes only extreme dust/debris and leaves
+// real autofluorescence — even in brighter images — untouched. The bulk of
+// artifacts is handled by the particle-size filter, and the downstream
+// cross-image MEDIAN of the background absorbs the few that remain. Also faster:
+// no per-channel histogram/percentile pass per image.
+// Log the brightest pixel of each marker channel inside the cytosol. Helps
+// calibrate ARTIFACT_UPPER_BOUND later (you see, per image, whether artifacts
+// sit at e.g. 20000 or only 4000). Computed on the RAW channel before any
+// artifact removal so a present artifact still registers as the max.
+// Returns the brightest RAW pixel value of `chTitle` inside the cytosol (and
+// logs it). Returns -1 if the channel/cytosol is unavailable. Called BEFORE
+// artifact removal, so a present artifact still shows up as the max — this is
+// the value written to the CSV as cyto_max_raw, to help tune ARTIFACT_UPPER_BOUND.
+function logChannelMaxInCytosol(chTitle, marker, chLabel) {
+    if (!isOpen(chTitle)) return -1;
+    if (countMaskForeground("Cytosol_Mask") == 0) {
+        print("  max intensity   " + chLabel + " " + marker + " : (empty cytosol)");
+        return -1;
+    }
+    selectWindow("Cytosol_Mask");
+    run("Create Selection");
+    selectWindow(chTitle);
+    run("Restore Selection");
+    getRawStatistics(nPix, meanV, minV, maxV);   // raw (uncalibrated) intensities
+    run("Select None");
+    selectWindow("Cytosol_Mask"); run("Select None");
+    print("  max intensity   " + chLabel + " " + marker + " : max=" + maxV
+        + "  (cytosol; ARTIFACT_UPPER_BOUND=" + ARTIFACT_UPPER_BOUND + ")");
+    return maxV;
+}
+
 function makeArtifactMaskFor(srcTitle, maskName) {
     selectWindow(srcTitle);
+    run("Select None");
     run("Duplicate...", "title=" + maskName);
     setThreshold(ARTIFACT_UPPER_BOUND, 65535);
     run("Convert to Mask");
@@ -536,7 +665,7 @@ function cleanCytosolMask(m1, m2) {
     // Count cytosol pixels BEFORE cleanup
     nBefore = countMaskForeground("Cytosol_Mask");
 
-    // (1+2+3) Artifact subtraction
+    // (1+2+3) Artifact subtraction (fixed upper-bound, both channels)
     buildCombinedArtifactMask(m1, m2);
     imageCalculator("Subtract create", "Cytosol_Mask", "Artifact_Mask");
     rename("Cytosol_Clean");
@@ -577,7 +706,7 @@ function countMaskForeground(maskTitle) {
 // populate values[]. We use bin index `i` directly as the pixel value.
 // ===========================================================
 
-function measureAndWrite(marker, chTitle, cytoRoiId, nCyto, nArtifactsExcluded,
+function measureAndWrite(marker, chTitle, cytoRoiId, nCyto, nArtifactsExcluded, cytoMax,
                          imgName, cellLine, tp, comboKey) {
     if (!isOpen(chTitle)) {
         print("  WARN: channel window missing: " + chTitle);
@@ -598,7 +727,7 @@ function measureAndWrite(marker, chTitle, cytoRoiId, nCyto, nArtifactsExcluded,
 
     stats = computeTopStats(counts, nBins, nTotal, TOP_PCT);
     csvPath = MEASURE_DIR_RUN_ID + CELL_LINE + "_mock_" + tp + "_" + marker + "_in_" + comboKey + ".csv";
-    appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, marker, stats, nCyto, nArtifactsExcluded);
+    appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, marker, stats, nCyto, nArtifactsExcluded, cytoMax);
 }
 
 function computeTopStats(counts, nBins, nTotal, topPct) {
@@ -649,9 +778,10 @@ function computeTopStats(counts, nBins, nTotal, topPct) {
     p99_999 = pctIndex(counts, nBins, nTotal, 99.999);
     p99_9995 = pctIndex(counts, nBins, nTotal, 99.9995);
     p99_9999 = pctIndex(counts, nBins, nTotal, 99.9999);
+    pmax = pctIndex(counts, nBins, nTotal, 100);
 
     return newArray(threshold_value, nTop, mean_top, median_top, std_top,
-                    p95, p99, p99_25, p99_5, p99_9, p99_95, p99_99, p99_995, p99_999, p99_9995, p99_9999);
+                    p95, p99, p99_25, p99_5, p99_9, p99_95, p99_99, p99_995, p99_999, p99_9995, p99_9999, pmax);
 }
 
 function pctIndex(counts, nBins, nTotal, p) {
@@ -673,14 +803,14 @@ function getRawStatisticsCount() {
 // ============== 7. CSV / OUTPUT ============================
 
 function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
-                      stats, nCyto, nArtifactsExcluded) {
+                      stats, nCyto, nArtifactsExcluded, cytoMax) {
     line = imgName + "," + cellLine + "," + tp + "," + comboKey + "," + channel
         + "," + STAT_METHOD + "," + TOP_PCT
         + "," + MODE + "," + THR_MODE
         + "," + stats[0] + "," + stats[1] + "," + nCyto + "," + nArtifactsExcluded
         + "," + stats[2] + "," + stats[3] + "," + stats[4]
         + "," + stats[5] + "," + stats[6] + "," + stats[7] + "," + stats[8] + "," + stats[9]
-        + "," + stats[10] + "," + stats[11] + "," + stats[12] + "," + stats[13] + "," + stats[14] + "," + stats[15]
+        + "," + stats[10] + "," + stats[11] + "," + stats[12] + "," + stats[13] + "," + stats[14] + "," + stats[15] + "," + cytoMax
         + "," + CELL_THR_METHOD + "," + NUC_THR_METHOD + "," + CELL_THR_FACTOR
         + "," + BLUR_SIGMA_CELL + "," + BLUR_SIGMA_NUC
         + "," + ARTIFACT_UPPER_BOUND + "," + MIN_PARTICLE_SIZE
