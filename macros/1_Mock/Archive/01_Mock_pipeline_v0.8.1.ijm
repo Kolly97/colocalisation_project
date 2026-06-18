@@ -1,37 +1,8 @@
 // ==========================================================
-// Mock Top-X% Pipeline  --  V0.9.0
+// Mock Top-X% Pipeline  --  V0.8.1
 // Author 	: Kolja Hildenbrand
-// Date   	: 2026-06-18
+// Date   	: 2026-06-02
 // Status	: Current
-//
-// Changes vs V0.8.1:
-//  - NEW: THIRD cytosol mode "manual draw" (ported from the coloc macro).
-//         The startup "Threshold mode" radio becomes a 3-way "Cytosol
-//         definition": automatic | manual threshold | manual draw. In
-//         "manual draw" you draw one or more FREEHAND regions on an RGB
-//         composite of all channels (makeDrawComposite / drawCytosolRois).
-//  - NEW: PER-ROI measurement in manual-draw mode. Each drawn region is
-//         measured SEPARATELY -> one CSV row per marker per region, with a new
-//         roi_index column (1..n). The regions are NUMBERED in a single QC
-//         composite (saveNumberedRoiQc); the number == roi_index, so a CSV row
-//         can be matched back to the region it came from. (automatic /
-//         manual-threshold modes stay one pooled cytosol per image = roi_index 1.)
-//  - NEW: the nucleus include/exclude question is asked ONCE in the startup
-//         mode dialog (global EXCLUDE_NUC, default ON), like the coloc macro,
-//         and now applies to ALL modes: automatic / manual threshold subtract it
-//         in makeCytosolMask(); manual draw subtracts it from each region.
-//  - DESIGN: each drawn region is turned into a "Cytosol_Mask" in the SAME
-//         binary state as makeCytosolMask(), so the shared downstream code (max
-//         log, artifact + particle cleanup, empty-mask guard, measurement) is
-//         REUSED. Artifact/particle cleanup still runs on hand-drawn regions on
-//         purpose (removes dust you may have included; keeps the bg estimate
-//         clean and consistent across modes).
-//  - CSV: new columns roi_index (after channel) and exclude_nuc (after
-//         threshold_mode); threshold_mode also takes the value "manual_draw".
-//  - REFACTOR: processOneImage now dispatches to processSingleCytosol (auto /
-//         manual threshold) or processManualDrawRois (manual draw).
-//  - NEW utils: drawCytosolRois(), makeDrawComposite(), measureOneDrawnRoi(),
-//         saveNumberedRoiQc(), closeIfOpen().
 //
 // Changes vs V0.8.0:
 //  - NEW: Flexible filename tokens. In "filename" mode a startup dialog
@@ -73,7 +44,7 @@
 
 // ============== 1. CONFIG (globals via `var`) ==============
 // Reproducibility
-var MACRO_VERSION = "0.9.0";
+var MACRO_VERSION = "0.8.1";
 
 // Runtime state
 var INPUT_DIR;
@@ -81,14 +52,8 @@ var MEASURE_DIR;
 var MEASURE_DIR_RUN_ID;
 var RUN_ID;
 var MODE;             // "filename" or "dialog"
-var THR_MODE;         // "automatic" | "manual" (threshold) | "manual_draw"
+var THR_MODE;         // "manual" or "automatic"
 var CELL_LINE = newArray("Huh7", "VeroE6", "Other cell line");  // type in cell lines in workflow, will be later overwritten by dialog
-
-// Subtract the nucleus (DAPI mask) from the cytosol (true) or keep it in (false).
-// Applies to ALL three modes: automatic / manual threshold subtract it inside
-// makeCytosolMask(); manual draw subtracts it from each drawn region. Asked ONCE
-// at startup in the mode dialog (askModeAndConfig), like the coloc macro.
-var EXCLUDE_NUC = true;
 
 // Lists used by CSV setup and per-image dialog
 var MARKERS       = newArray("HA568", "HA488", "dsRNA488", "NS4B568");
@@ -144,9 +109,9 @@ var SAVE_MASKS         = true;   // binary mask TIFs (cell, nuc, cyto, artifact)
 var SAVE_COMPOSITE_JPG = true;   // 3-channel composite + cytosol outline (JPG)
 
 // CSV header — columns added in V0.4 marked with /* V0.4 */
-var CSV_HEADER = "image,cell_line,timepoint,combo,channel,roi_index," /* V0.9: per-ROI */
+var CSV_HEADER = "image,cell_line,timepoint,combo,channel,"
                + "stat_method,top_pct,"
-               + "macro_mode,threshold_mode,exclude_nuc," /* V0.9 */
+               + "macro_mode,threshold_mode,"
                + "threshold_value,n_top_pixels,n_cyto_pixels,n_artifacts_excluded," /* V0.4 */
                + "mean_top,median_top,std_top,"
                + "p95,p99,p99_25,p99_5,p99_9,p99_95,p99_99,p99_995,p99_999,p99_9995,p99_9999,cyto_max_raw,"
@@ -166,7 +131,7 @@ var CSV_HEADER = "image,cell_line,timepoint,combo,channel,roi_index," /* V0.9: p
 setOption("BlackBackground", true);
 
 chooseInputDir();
-askModeAndConfig();   // also calls applyCellLineDefaults() + asks EXCLUDE_NUC
+askModeAndConfig();   // also calls applyCellLineDefaults()
 RUN_ID = makeRunId();
 buildOutputDir();
 mockFiles = listMockFiles();
@@ -183,7 +148,6 @@ print("Markers   : " + arrToStr(MARKERS));
 print("Combos    : " + arrToStr(ANALYSE_COMBI));
 print("Timepoints: " + arrToStr(TIMEPOINTS));
 print("Threshold mode: " + THR_MODE);
-print("Exclude nucleus: " + EXCLUDE_NUC + " (1=excluded, 0=kept)");
 print("Artifact upper bound: " + ARTIFACT_UPPER_BOUND);
 print("Min particle size  : " + MIN_PARTICLE_SIZE);
 print("Found " + mockFiles.length + " mock .tif files.");
@@ -211,28 +175,14 @@ function askModeAndConfig() {
                     + "and how much influence do you want to have?");
     Dialog.addRadioButtonGroup("Mode:",
         newArray("filename", "dialog"), 2, 1, "filename");
-    Dialog.addMessage("How should the cytosol measurement region be defined?\n"
-                    + "  automatic        = auto-threshold cell & nucleus masks\n"
-                    + "  manual threshold = same, but pause to adjust the sliders\n"
-                    + "  manual draw      = draw the cytosol freehand (like the coloc macro)");
-    Dialog.addRadioButtonGroup("Cytosol definition:",
-        newArray("automatic", "manual threshold", "manual draw"), 3, 1, "automatic");
+    Dialog.addRadioButtonGroup("Threshold mode:",
+        newArray("manual", "automatic"), 2, 1, "automatic");
     Dialog.addMessage("What cell line are you analysing?");
     Dialog.addRadioButtonGroup("Cell line:", CELL_LINE, CELL_LINE.length, 1, CELL_LINE[0]);
-    Dialog.addMessage("Should the nucleus be excluded from the cytosol? (like the coloc macro)");
-    Dialog.addCheckbox("Exclude nucleus (DAPI mask) from the cytosol", EXCLUDE_NUC);
     Dialog.show();
-    MODE        = Dialog.getRadioButton();
-    cytoChoice  = Dialog.getRadioButton();
-    CELL_LINE   = Dialog.getRadioButton();
-    EXCLUDE_NUC = Dialog.getCheckbox();
-
-    // Map the radio label to the internal THR_MODE value (also the CSV
-    // threshold_mode). "manual draw" is a separate ROI strategy, not a
-    // thresholding mode, but it shares this single 3-way selector for a simple UX.
-    if (cytoChoice == "manual threshold")  THR_MODE = "manual";
-    else if (cytoChoice == "manual draw")  THR_MODE = "manual_draw";
-    else                                   THR_MODE = "automatic";
+    MODE      = Dialog.getRadioButton();
+    THR_MODE  = Dialog.getRadioButton();
+    CELL_LINE = Dialog.getRadioButton();
 
     // Apply cell-line-specific defaults BEFORE the list dialog,
     // so the user could (in theory) override them below.
@@ -361,28 +311,14 @@ function processOneImage(fname) {
 
     // ---- channels -----------------------------------------
     splitAndRenameChannels(title, m1, m2);
-
-    // ---- measure (mode-dependent) -------------------------
-    // automatic / manual threshold: ONE pooled cytosol per image (roi_index 1).
-    // manual draw: the user draws regions; EACH is measured separately and gets
-    // its own roi_index (numbered to match the QC image).
-    if (THR_MODE == "manual_draw")
-        processManualDrawRois(imgName, cellLine, tp, comboKey, m1, m2);
-    else
-        processSingleCytosol(imgName, cellLine, tp, comboKey, m1, m2);
-}
-
-// ------------------------------
-// AUTOMATIC / MANUAL-THRESHOLD path: build ONE cytosol (cell [- nucleus]) for the
-// whole image and measure it (roi_index = 1). This is the original v0.8 flow.
-// ------------------------------
-function processSingleCytosol(imgName, cellLine, tp, comboKey, m1, m2) {
     cellSrc = pickCellMaskSource(m1, m2);
     if (cellSrc == "") {
         print("  SKIP: no marker channel suitable as Cell-Mask source");
         return;
     }
     print("  Cell-Mask source: " + cellSrc);
+
+    // ---- masks --------------------------------------------
     if (THR_MODE == "automatic") {
         makeCellMask(cellSrc);
         makeNucleusMask("DAPI_channel");
@@ -390,116 +326,54 @@ function processSingleCytosol(imgName, cellLine, tp, comboKey, m1, m2) {
         makeCellMaskManual(cellSrc);
         makeNucleusMaskManual("DAPI_channel");
     }
-    makeCytosolMask();          // honours EXCLUDE_NUC
+    makeCytosolMask();
 
-    // Brightest raw pixel per channel BEFORE artifact removal (cyto_max_raw).
+    // Brightest pixel per marker channel WITHIN the cytosol, BEFORE artifact
+    // removal — so any artifact still shows up as the max. Logged AND written to
+    // the CSV (cyto_max_raw) so you can see where artifacts sit (e.g. 20000 vs
+    // 4000) and tune ARTIFACT_UPPER_BOUND.
     cytoMaxM1 = logChannelMaxInCytosol(m1 + "_channel", m1, "C1");
     cytoMaxM2 = logChannelMaxInCytosol(m2 + "_channel", m2, "C2");
 
+    // ---- artifact + particle cleanup ---------------------
+    // Fixed high upper-bound (V0.7.3): removes only extreme dust; the particle
+    // filter + cross-image median handle the rest. cleanCytosolMask returns how
+    // many pixels were removed by artifact exclusion (written to the CSV).
     nArtifactsExcluded = cleanCytosolMask(m1, m2);
 
-    // Guard: empty cytosol = nothing meaningful to measure.
+    // Guard: empty / too-small cytosol = nothing meaningful to measure
     selectWindow("Cytosol_Mask");
     run("Invert");
     getStatistics(area, meanCyto);
-    if (meanCyto == 0) { print("  SKIP: cytosol mask empty after cleanup"); return; }
+    if (meanCyto == 0) {
+        print("  SKIP: cytosol mask empty after cleanup");
+        return;
+    }
 
+    // Make cytosol foreground a re-applicable ROI
     roiManager("reset");
     selectWindow("Cytosol_Mask");
     run("Create Selection");
     roiManager("Add");
     cytoRoiId = 0;
     nCyto = getRawStatisticsCount();
-    if (nCyto < 1000)
+    if (nCyto < 1000) {
         print("  WARN: cytosol very small after cleanup (" + nCyto + " px) — measurements may be unreliable");
+    }
 
-    measureAndWrite(m1, m1 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, cytoMaxM1, imgName, cellLine, tp, comboKey, 1);
-    measureAndWrite(m2, m2 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, cytoMaxM2, imgName, cellLine, tp, comboKey, 1);
+    // ---- measure each marker ------------------------------
+    measureAndWrite(m1, m1 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, cytoMaxM1, imgName, cellLine, tp, comboKey);
+    measureAndWrite(m2, m2 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, cytoMaxM2, imgName, cellLine, tp, comboKey);
 
-    // Composite JPG BEFORE saveMasksTif (saveMasksTif renames the mask windows).
+    // ---- save artefacts -----------------------------------
+    // Order matters: composite JPG must come BEFORE saveMasksTif,
+    // because saveMasksTif uses saveAs() which renames the mask
+    // windows — by then the m1/m2/DAPI channel windows are still
+    // intact, but if any later step closes them the composite
+    // wouldn't have the data to merge. Doing JPG first is safe.
     if (SAVE_QC)            saveQcOverlay(imgName, m1);
     if (SAVE_COMPOSITE_JPG) saveCompositeJpg(imgName, m1, m2);
     if (SAVE_MASKS)         saveMasksTif(imgName);
-}
-
-// ------------------------------
-// MANUAL-DRAW path (V0.9): the user draws one or more freehand regions; EACH is
-// measured separately (one CSV row per marker per region, roi_index = 1..n) and
-// numbered in a single QC composite so a CSV row can be matched to its region.
-// The nucleus is subtracted from each region iff EXCLUDE_NUC.
-// ------------------------------
-function processManualDrawRois(imgName, cellLine, tp, comboKey, m1, m2) {
-    nRois = drawCytosolRois(m1, m2);     // drawn ROIs left in manager 0..nRois-1
-    if (nRois == 0) { print("  SKIP: no cytosol region drawn"); return; }
-
-    if (EXCLUDE_NUC) makeNucleusMask("DAPI_channel");   // built once, reused per ROI
-
-    for (i = 0; i < nRois; i = i + 1)
-        measureOneDrawnRoi(i, imgName, cellLine, tp, comboKey, m1, m2);
-
-    // QC: composite with every drawn region outlined + numbered (number == roi_index).
-    if (SAVE_COMPOSITE_JPG) saveNumberedRoiQc(imgName, m1, m2, nRois);
-
-    closeIfOpen("Nucleus_Mask");
-}
-
-// ------------------------------
-// Measure ONE drawn region (manager index i): build its cytosol mask
-// (drawn region [- nucleus]), clean artifacts, and write one CSV row per marker
-// with roi_index = i+1. The drawn ROIs (0..nRois-1) are left untouched — the
-// cleaned cytosol selection is appended, measured, then deleted again.
-// ------------------------------
-function measureOneDrawnRoi(i, imgName, cellLine, tp, comboKey, m1, m2) {
-    closeIfOpen("Cytosol_Mask");
-    closeIfOpen("Artifact_Mask");
-
-    // Per-region cytosol mask in the SAME state as makeCytosolMask(): fill the
-    // drawn region, optionally subtract the nucleus, then threshold + Convert to
-    // Mask. This lets the shared cleanup / measurement code be reused as-is.
-    selectWindow(m1 + "_channel");
-    getDimensions(W, H, ch, sl, fr);
-    newImage("Cytosol_Mask", "8-bit black", W, H, 1);
-    roiManager("Select", i);
-    setColor(255);
-    fill();
-    run("Select None");
-    if (EXCLUDE_NUC) imageCalculator("Subtract", "Cytosol_Mask", "Nucleus_Mask");
-    selectWindow("Cytosol_Mask");
-    setThreshold(1, 255);
-    run("Convert to Mask");
-
-    cytoMaxM1 = logChannelMaxInCytosol(m1 + "_channel", m1, "C1");
-    cytoMaxM2 = logChannelMaxInCytosol(m2 + "_channel", m2, "C2");
-
-    nArtifactsExcluded = cleanCytosolMask(m1, m2);
-
-    // Guard (same Invert sequence as the single-cytosol path).
-    selectWindow("Cytosol_Mask");
-    run("Invert");
-    getStatistics(area, meanCyto);
-    if (meanCyto == 0) {
-        print("  ROI " + (i+1) + ": SKIP (cytosol empty after cleanup)");
-        closeIfOpen("Cytosol_Mask");
-        closeIfOpen("Artifact_Mask");
-        return;
-    }
-
-    // Append the cleaned cytosol selection AFTER the drawn ROIs, measure, delete.
-    selectWindow("Cytosol_Mask");
-    run("Create Selection");
-    roiManager("Add");
-    cytoRoiId = roiManager("count") - 1;
-    nCyto = getRawStatisticsCount();
-    if (nCyto < 1000)
-        print("  ROI " + (i+1) + ": WARN cytosol very small (" + nCyto + " px)");
-
-    measureAndWrite(m1, m1 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, cytoMaxM1, imgName, cellLine, tp, comboKey, (i+1));
-    measureAndWrite(m2, m2 + "_channel", cytoRoiId, nCyto, nArtifactsExcluded, cytoMaxM2, imgName, cellLine, tp, comboKey, (i+1));
-
-    roiManager("Select", cytoRoiId);
-    roiManager("Delete");
-    closeIfOpen("Cytosol_Mask");
-    closeIfOpen("Artifact_Mask");
 }
 
 function tryParseFilename(imgName) {
@@ -700,87 +574,13 @@ function makeNucleusMaskManual(dapiTitle) {
     }
 }
 
-// Cytosol = Cell − Nucleus (if EXCLUDE_NUC) else the whole cell mask. 8-bit
-// subtraction clamps at 0, giving a clean binary: cell-not-nucleus = 255, else 0.
+// Cytosol = Cell − Nucleus. 8-bit subtraction clamps at 0, giving a clean
+// binary: cell-not-nucleus = 255, else 0.
 function makeCytosolMask() {
-    if (EXCLUDE_NUC) {
-        imageCalculator("Subtract create", "Cell_Mask", "Nucleus_Mask");
-        rename("Cytosol_Mask");
-    } else {
-        // keep the nucleus in: the "cytosol" IS the whole cell mask
-        selectWindow("Cell_Mask");
-        run("Duplicate...", "title=Cytosol_Mask");
-    }
+    imageCalculator("Subtract create", "Cell_Mask", "Nucleus_Mask");
+    rename("Cytosol_Mask");
     setThreshold(1, 255);
     run("Convert to Mask");
-}
-
-// ------------------------------
-// MANUAL DRAW (V0.9): let the user draw one or more freehand cytosol regions on
-// an RGB composite of all channels. The regions are LEFT in the ROI Manager
-// (index 0..count-1) so each can be measured separately and numbered in the QC;
-// returns the count (0 if nothing drawn). The raw channel windows survive.
-//
-// CONTRACT NOTE: measureOneDrawnRoi turns each drawn region into a "Cytosol_Mask"
-// in the SAME binary state as makeCytosolMask() (a fresh Convert-to-Mask of a
-// 0/255 image), so the shared downstream code (max log, artifact/particle
-// cleanup, empty-mask guard, measurement) is reused unchanged.
-// ------------------------------
-function drawCytosolRois(m1, m2) {
-    setOption("BlackBackground", true);
-    makeDrawComposite(m1, m2);            // "Draw_RGB" (raw channel windows survive)
-
-    roiManager("reset");
-    setTool("freehand");
-    more = true;
-    count = 0;
-    while (more) {
-        selectWindow("Draw_RGB");
-        run("Select None");
-        // Show regions drawn so far (numbered) so you can see what is marked.
-        roiManager("Show All with labels");
-        waitForUser("Draw cytosol region #" + (count+1),
-            "Already-drawn regions are outlined and numbered on the image.\n\n"
-          + "Draw a FREEHAND ROI around clean CYTOSOL (avoid debris),\n"
-          + "then click OK. Each region is measured SEPARATELY.\n"
-          + "(Cancel aborts the WHOLE run.)");
-        if (selectionType() != -1) {
-            roiManager("Add");
-            count = count + 1;
-        } else {
-            print("  (empty selection ignored)");
-        }
-        Dialog.create("More regions?");
-        Dialog.addRadioButtonGroup("Action:", newArray("draw another", "done"), 2, 1, "done");
-        Dialog.show();
-        if (Dialog.getRadioButton() == "done") more = false;
-    }
-    roiManager("Show None");
-    closeIfOpen("Draw_RGB");
-
-    if (count == 0) print("  WARN: no cytosol region drawn");
-    return count;
-}
-
-// ------------------------------
-// Build an RGB composite of the 3 RAW channels for freehand drawing. The source
-// channels are DUPLICATED so the split m1/m2/DAPI windows survive for the later
-// measurement step (the duplicates are consumed by Merge Channels). Ported from
-// the coloc macro's makeDrawComposite. Leaves the active window "Draw_RGB".
-// ------------------------------
-function makeDrawComposite(m1, m2) {
-    selectWindow(m1 + "_channel");  run("Select None"); run("Duplicate...", "title=draw_m1");
-    selectWindow(m2 + "_channel");  run("Select None"); run("Duplicate...", "title=draw_m2");
-    selectWindow("DAPI_channel");   run("Select None"); run("Duplicate...", "title=draw_dapi");
-    run("Merge Channels...", "c1=draw_m1 c2=draw_m2 c3=draw_dapi create");
-    Stack.setDisplayMode("composite");
-    Stack.setChannel(1); run("Enhance Contrast", "saturated=0.35");
-    Stack.setChannel(2); run("Enhance Contrast", "saturated=0.35");
-    Stack.setChannel(3); run("Enhance Contrast", "saturated=0.35");
-    run("Stack to RGB");
-    rename("Draw_RGB");
-    closeIfOpen("Composite");
-    setOption("BlackBackground", true);
 }
 
 
@@ -907,7 +707,7 @@ function countMaskForeground(maskTitle) {
 // ===========================================================
 
 function measureAndWrite(marker, chTitle, cytoRoiId, nCyto, nArtifactsExcluded, cytoMax,
-                         imgName, cellLine, tp, comboKey, roiIndex) {
+                         imgName, cellLine, tp, comboKey) {
     if (!isOpen(chTitle)) {
         print("  WARN: channel window missing: " + chTitle);
         return;
@@ -927,7 +727,7 @@ function measureAndWrite(marker, chTitle, cytoRoiId, nCyto, nArtifactsExcluded, 
 
     stats = computeTopStats(counts, nBins, nTotal, TOP_PCT);
     csvPath = MEASURE_DIR_RUN_ID + CELL_LINE + "_mock_" + tp + "_" + marker + "_in_" + comboKey + ".csv";
-    appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, marker, roiIndex, stats, nCyto, nArtifactsExcluded, cytoMax);
+    appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, marker, stats, nCyto, nArtifactsExcluded, cytoMax);
 }
 
 function computeTopStats(counts, nBins, nTotal, topPct) {
@@ -1002,13 +802,11 @@ function getRawStatisticsCount() {
 
 // ============== 7. CSV / OUTPUT ============================
 
-function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel, roiIndex,
+function appendCsvRow(csvPath, imgName, cellLine, tp, comboKey, channel,
                       stats, nCyto, nArtifactsExcluded, cytoMax) {
-    excl = "false";
-    if (EXCLUDE_NUC) excl = "true";
-    line = imgName + "," + cellLine + "," + tp + "," + comboKey + "," + channel + "," + roiIndex
+    line = imgName + "," + cellLine + "," + tp + "," + comboKey + "," + channel
         + "," + STAT_METHOD + "," + TOP_PCT
-        + "," + MODE + "," + THR_MODE + "," + excl
+        + "," + MODE + "," + THR_MODE
         + "," + stats[0] + "," + stats[1] + "," + nCyto + "," + nArtifactsExcluded
         + "," + stats[2] + "," + stats[3] + "," + stats[4]
         + "," + stats[5] + "," + stats[6] + "," + stats[7] + "," + stats[8] + "," + stats[9]
@@ -1047,55 +845,6 @@ function saveQcOverlay(imgName, m1) {
     saveAs("PNG", qcDir + filename);
     close();
     if (isOpen("qc_tmp")) { selectWindow("qc_tmp"); close(); }
-}
-
-// ------------------------------
-// QC for MANUAL-DRAW mode: a composite of the 3 RAW channels with every drawn
-// region outlined AND numbered. The number == roi_index in the CSV, so a row can
-// be matched back to the region it came from. Expects the drawn ROIs to be in the
-// ROI Manager at indices 0..nRois-1 (the temp cytosol ROIs are deleted by
-// measureOneDrawnRoi, so only the drawn regions remain).
-// ------------------------------
-function saveNumberedRoiQc(imgName, m1, m2, nRois) {
-    if (!isOpen(m1 + "_channel") || !isOpen(m2 + "_channel") || !isOpen("DAPI_channel")) {
-        print("  WARN: numbered ROI QC skipped (missing channel window)");
-        return;
-    }
-    selectWindow(m1 + "_channel"); run("Select None"); run("Duplicate...", "title=qc_m1");
-    selectWindow(m2 + "_channel"); run("Select None"); run("Duplicate...", "title=qc_m2");
-    selectWindow("DAPI_channel");  run("Select None"); run("Duplicate...", "title=qc_dapi");
-
-    run("Merge Channels...", "c1=qc_m1 c2=qc_m2 c3=qc_dapi create");
-    Stack.setDisplayMode("composite");
-    Stack.setChannel(1); run("Enhance Contrast", "saturated=0.35");
-    Stack.setChannel(2); run("Enhance Contrast", "saturated=0.35");
-    Stack.setChannel(3); run("Enhance Contrast", "saturated=0.35");
-    run("Stack to RGB");
-
-    nR = roiManager("count");
-    for (i = 0; i < nR; i = i + 1) { roiManager("Select", i); run("Add Selection..."); }
-    run("Flatten");                       // bake the outlines into a new RGB image
-
-    // Number each region (number == roi_index). drawString writes onto the RGB.
-    setFont("SansSerif", 36, "bold antialiased");
-    setColor(255, 255, 0);
-    for (i = 0; i < nR; i = i + 1) {
-        roiManager("Select", i);
-        getSelectionBounds(bx, by, bw, bh);
-        run("Select None");
-        drawString("" + (i+1), bx + bw/2, by + bh/2);
-    }
-
-    run("Options...", "jpeg=90");
-    qcDir = MEASURE_DIR_RUN_ID + "qc" + File.separator;
-    qcPath = qcDir + RUN_ID + "_" + imgName + "_qc_rois.jpg";
-    saveAs("Jpeg", qcPath);
-    print("  saved numbered ROI QC (" + nR + " regions) -> " + qcPath);
-
-    close();
-    closeIfOpen("Composite (RGB)");
-    closeIfOpen("Composite");
-    setOption("BlackBackground", true);
 }
 
 // ------------------------------
@@ -1233,8 +982,4 @@ function arrToStr(a) {
 function inArray(val, arr) {
     for (i = 0; i < arr.length; i++) if (arr[i] == val) return true;
     return false;
-}
-
-function closeIfOpen(title) {
-    if (isOpen(title)) { selectWindow(title); close(); }
 }
